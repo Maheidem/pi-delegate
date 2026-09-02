@@ -187,9 +187,17 @@ export class DelegateApplicationImpl implements DelegateApplication {
 		const agentDir = this.ports.agentDir;
 		// Config cascade: project .pi/delegate/config.json overlays the
 		// user-wide (live) config per run; missing file = live config.
-		const baseCfg: DelegateConfigV1 = request.projectRoot
-			? applyProjectOverlay(this.liveConfig, request.projectRoot)
-			: this.liveConfig;
+		let baseCfg: DelegateConfigV1 = this.liveConfig;
+		if (request.projectRoot) {
+			// Strip the overlay's diagnostic keys so only real config fields
+			// reach the runner (a spurious key would survive into metadata).
+			const overlay = applyProjectOverlay(this.liveConfig, request.projectRoot);
+			const { projectOverrides, projectCorrupt, ...rest } = overlay as unknown as DelegateConfigV1 & {
+				projectOverrides: string[];
+				projectCorrupt?: string;
+			};
+			baseCfg = { ...(rest as unknown as DelegateConfigV1) } as DelegateConfigV1;
+		}
 
 		// Per-invocation timeout overrides the config-cascade value, clamped
 		// to the configured bounds; inactivity scales to match. A per-run
