@@ -183,6 +183,85 @@ export function clampTimeoutMs(value: number): number {
 	return Math.min(max, Math.max(min, Math.trunc(value)));
 }
 
+/** Clamp one numeric config field; null when the key is not a numeric knob. */
+export function clampConfigField(key: string, value: number): number | null {
+	if (key === "schemaVersion" || key === "defaultRole") return null;
+	if (!Number.isFinite(value)) return null;
+	const min = MIN_VALUES[key as keyof DelegateConfigV1];
+	const max = MAX_VALUES[key as keyof DelegateConfigV1];
+	if (min === undefined && max === undefined) return null;
+	return Math.min(max ?? Number.MAX_SAFE_INTEGER, Math.max(min ?? 0, Math.trunc(value)));
+}
+
+/**
+ * Resolve the effective run timeouts. Priority: per-invocation > project
+ * > user (baseCfg already carries the project overlay). The inactivity
+ * watchdog is capped at half of the hard timeout regardless of source, so
+ * a long-silent child can never outlive its watchdog.
+ */
+export function resolveRunTimeouts(
+	baseCfg: DelegateConfigV1,
+	timeoutMs?: number,
+): { hardMs: number; inactivityMs: number } {
+	const hardMs = timeoutMs !== undefined ? clampTimeoutMs(timeoutMs) : baseCfg.hardTimeoutMs;
+	const inactivityMs = Math.min(
+		baseCfg.inactivityTimeoutMs,
+		Math.max(1_000, Math.floor(hardMs / 2)),
+	);
+	return { hardMs, inactivityMs };
+}
+
+/** Human-readable duration for TUI display and prefilled inputs. */
+export function formatDuration(ms: number): string {
+	if (!Number.isFinite(ms) || ms < 0) return "?";
+	if (ms < 1_000) return `${Math.round(ms)}ms`;
+	const totalSec = Math.round(ms / 1_000);
+	if (totalSec < 60) return `${totalSec}s`;
+	const m = Math.floor(totalSec / 60);
+	const s = totalSec % 60;
+	if (m < 60) return s ? `${m}m ${s}s` : `${m}m`;
+	const h = Math.floor(m / 60);
+	const remM = m % 60;
+	if (h < 24) return remM ? `${h}h ${remM}m` : `${h}h`;
+	const d = Math.floor(h / 24);
+	const remH = h % 24;
+	return remH ? `${d}d ${remH}h` : `${d}d`;
+}
+
+/**
+ * Merge fields into the project-wide config file (overlay semantics: only
+ * the given keys change; other project keys are preserved). A corrupt
+ * existing file is preserved as timestamped evidence and replaced.
+ */
+export function saveProjectConfig(projectRoot: string, fields: Partial<DelegateConfigV1>): string {
+	const pPath = projectConfigPath(projectRoot);
+	let existing: Record<string, unknown> = {};
+	try {
+		const raw = JSON.parse(fs.readFileSync(pPath, "utf8"));
+		if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+			existing = raw as Record<string, unknown>;
+		} else {
+			throw new Error("project config is not a JSON object");
+		}
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+			try {
+				const evidence = `${pPath}.corrupt-${Date.now()}`;
+				fs.renameSync(pPath, evidence);
+				fs.chmodSync(evidence, 0o600);
+			} catch {
+				// evidence rename failed; still start fresh
+			}
+		}
+	}
+	const known = new Set<string>(Object.keys(DEFAULT_DELEGATE_CONFIG));
+	for (const [key, value] of Object.entries(fields)) {
+		if (known.has(key)) existing[key] = value;
+	}
+	fs.mkdirSync(path.dirname(pPath), { recursive: true });
+	return atomicWriteJson(pPath, existing);
+}
+
 /**
  * Parse a human duration into milliseconds: "90s", "10m", "2h", "1d",
  * or a bare number (already ms). Returns undefined for empty input;

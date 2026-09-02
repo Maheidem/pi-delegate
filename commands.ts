@@ -23,7 +23,7 @@ export type DelegateIntent =
 	| { kind: "invalid"; token: string; usage: string };
 
 export const DELEGATE_USAGE = [
-	"/delegate                          dashboard (TUI) or status (headless)",
+	"/delegate                          dashboard (TUI: edit base timeouts) or status (headless)",
 	"/delegate on                        enable strict delegation mode",
 	"/delegate off                       disable strict delegation mode",
 	"/delegate status                    mode, active run, last run",

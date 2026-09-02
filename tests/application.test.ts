@@ -237,3 +237,47 @@ test("app: retention enforced after runs", async () => {
 	const runs = store.listRuns(dir, 50);
 	assert.ok(runs.length <= 2, `retention should cap at maxRuns, got ${runs.length}`);
 });
+
+// ── Base timeouts: dashboard edits + status cascade ───────────────────────
+
+test("app: patchConfig accepts duration strings", async () => {
+	const dir = tmpDir("app");
+	const a = app(dir, FAKE_OK);
+	assert.equal(a.patchConfig("hardTimeoutMs", "2h"), null);
+	const s = a.getStatus(["read"]);
+	assert.equal(s.timeouts.userHardMs, 7_200_000);
+	assert.equal(a.patchConfig("hardTimeoutMs", "soon"), "invalid duration 'soon' (use e.g. 90s, 10m, 2h, 1d, or bare ms)");
+	assert.equal(a.patchConfig("hardTimeoutMs", ""), "Value is empty.");
+	assert.equal(a.patchConfig("nope", "5m"), "Unknown setting 'nope'.");
+});
+
+test("app: patchProjectConfig writes overlay; status reflects project source", async () => {
+	const dir = tmpDir("app");
+	const fs = await import("node:fs");
+	const path = await import("node:path");
+	const proj = path.join(dir, "proj");
+	fs.mkdirSync(proj, { recursive: true });
+	const a = app(dir, FAKE_OK);
+	// no project file: user source
+	const s0 = a.getStatus(["read"], proj);
+	assert.equal(s0.timeouts.source, "user");
+	assert.equal(s0.timeouts.projectOverrides?.length, 0);
+	// edit project overlay
+	assert.equal(a.patchProjectConfig(proj, "hardTimeoutMs", "2h"), null);
+	const s1 = a.getStatus(["read"], proj);
+	assert.equal(s1.timeouts.source, "project");
+	assert.equal(s1.timeouts.hardMs, 7_200_000);
+	assert.equal(s1.timeouts.projectHardMs, 7_200_000);
+	assert.deepEqual(s1.timeouts.projectOverrides, ["hardTimeoutMs"]);
+	// user value untouched
+	assert.equal(s1.timeouts.userHardMs, 30_000); // fastConfig hard
+	// invalid values
+	assert.equal(a.patchProjectConfig(proj, "hardTimeoutMs", "soon"), "invalid duration 'soon' (use e.g. 90s, 10m, 2h, 1d, or bare ms)");
+	assert.equal(a.patchProjectConfig(proj, "nope", "5m"), "Unknown setting 'nope'.");
+	// corrupt project file: user wins, diagnosed
+	const { projectConfigPath } = await import("../config.ts");
+	fs.writeFileSync(projectConfigPath(proj), "{ broken");
+	const s2 = a.getStatus(["read"], proj);
+	assert.equal(s2.timeouts.source, "user");
+	assert.ok(s2.timeouts.projectCorrupt);
+});

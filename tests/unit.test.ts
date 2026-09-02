@@ -671,3 +671,61 @@ test("timeout: project values are clamped by the same bounds", async () => {
 	const res = loadConfigCascade(agentDir, proj);
 	assert.equal(res.config.hardTimeoutMs, 604_800_000, "clamped to max week");
 });
+
+// ── Timeout display + project saves ───────────────────────────────────────
+
+test("timeout: formatDuration renders human units", async () => {
+	const { formatDuration } = await import("../config.ts");
+	assert.equal(formatDuration(500), "500ms");
+	assert.equal(formatDuration(45_000), "45s");
+	assert.equal(formatDuration(90_000), "1m 30s");
+	assert.equal(formatDuration(1_800_000), "30m");
+	assert.equal(formatDuration(5_400_000), "1h 30m");
+	assert.equal(formatDuration(93_600_000), "1d 2h");
+});
+
+test("timeout: resolveRunTimeouts caps inactivity at half of hard", async () => {
+	const { resolveRunTimeouts, DEFAULT_DELEGATE_CONFIG } = await import("../config.ts");
+	const base = { ...DEFAULT_DELEGATE_CONFIG, hardTimeoutMs: 30 * 60_000, inactivityTimeoutMs: 5 * 60_000 };
+	// no override: unchanged (5m < 15m cap)
+	assert.deepEqual(resolveRunTimeouts(base), { hardMs: 30 * 60_000, inactivityMs: 5 * 60_000 });
+	// per-invocation 8m: inactivity capped to 4m
+	assert.deepEqual(resolveRunTimeouts(base, 8 * 60_000), { hardMs: 8 * 60_000, inactivityMs: 4 * 60_000 });
+	// per-invocation 2h: inactivity stays 5m
+	assert.deepEqual(resolveRunTimeouts(base, 2 * 3_600_000), { hardMs: 2 * 3_600_000, inactivityMs: 5 * 60_000 });
+	// per-invocation clamped to bounds
+	assert.equal(resolveRunTimeouts(base, 999).hardMs, 1_000, "min clamp");
+	assert.equal(resolveRunTimeouts(base, 10 ** 15).hardMs, 604_800_000, "max clamp");
+});
+
+test("timeout: saveProjectConfig creates, merges, recovers from corruption", async () => {
+	const { saveProjectConfig, projectConfigPath } = await import("../config.ts");
+	const fs = await import("node:fs");
+	const os = await import("node:os");
+	const path = await import("node:path");
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-proj-save-"));
+	const pPath = projectConfigPath(dir);
+	// create
+	saveProjectConfig(dir, { hardTimeoutMs: 7_200_000 });
+	assert.equal(JSON.parse(fs.readFileSync(pPath, "utf8")).hardTimeoutMs, 7_200_000);
+	// merge preserves existing keys, ignores unknown
+	saveProjectConfig(dir, { inactivityTimeoutMs: 120_000 } as never);
+	const merged = JSON.parse(fs.readFileSync(pPath, "utf8"));
+	assert.equal(merged.hardTimeoutMs, 7_200_000);
+	assert.equal(merged.inactivityTimeoutMs, 120_000);
+	assert.equal(merged.notAKey, undefined);
+	// corruption preserved as evidence, replaced
+	fs.writeFileSync(pPath, "{ broken");
+	saveProjectConfig(dir, { hardTimeoutMs: 1_800_000 });
+	assert.equal(JSON.parse(fs.readFileSync(pPath, "utf8")).hardTimeoutMs, 1_800_000);
+	assert.ok(fs.readdirSync(path.dirname(pPath)).some((f) => f.includes(".corrupt-")));
+});
+
+test("timeout: clampConfigField rejects unknown keys, clamps bounds", async () => {
+	const { clampConfigField } = await import("../config.ts");
+	assert.equal(clampConfigField("hardTimeoutMs", 7200_000), 7_200_000);
+	assert.equal(clampConfigField("hardTimeoutMs", 999_999_999), 604_800_000);
+	assert.equal(clampConfigField("hardTimeoutMs", 10), 1_000);
+	assert.equal(clampConfigField("defaultRole", 5), null);
+	assert.equal(clampConfigField("nope", 5), null);
+});

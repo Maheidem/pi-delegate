@@ -59,6 +59,14 @@ Three levels, highest priority first:
 3. **User-wide** — `~/.pi/agent/delegate/config.json`
    (`hardTimeoutMs` default 30 min, `inactivityTimeoutMs` default 5 min).
 
+The dashboard (`/delegate`) shows the effective base timeout with its source
+(`user-wide` or `project`) and has an editable **Timeouts (base)** section:
+`Hard · user-wide`, `Hard · project` (merges one key into
+`<project>/.pi/delegate/config.json`), and `Idle · user-wide` (the no-output
+watchdog, capped at half of the hard timeout for any source). Inputs accept
+durations (`30m`, `2h`, `1d`) or bare ms. Headless `/delegate status` prints
+the same base-timeout line.
+
 Tool (`delegate`) is available to models: same semantics, JSON result with
 `ok`/`handoff`/`details` (usage, paths, state) or structured `error`.
 

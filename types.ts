@@ -303,6 +303,23 @@ export interface DelegateStatus {
 		durationMs?: number;
 	} | null;
 	defaultRole: RoleName;
+	/** Effective timeout view for the current project (cascade resolved). */
+	timeouts: {
+		/** Effective hard/inactivity used for runs in this project. */
+		hardMs: number;
+		inactivityMs: number;
+		/** Where the effective hard timeout comes from. */
+		source: "user" | "project";
+		userHardMs: number;
+		userInactivityMs: number;
+		/** Present when the project file overrides the hard timeout. */
+		projectHardMs?: number;
+		projectPath?: string;
+		/** Config keys overridden by the project file. */
+		projectOverrides?: string[];
+		/** Set when a corrupt project file was ignored (user values used). */
+		projectCorrupt?: string;
+	};
 	store: DelegatePaths;
 }
 
@@ -376,7 +393,8 @@ export interface DelegateApplication {
 	cancel(runId?: string): Promise<CancelResult>;
 	inspect(runId?: string, includeTranscript?: boolean): RunInspection;
 	doctor(): DoctorReport;
-	getStatus(activeTools: string[] | "degraded"): DelegateStatus;
+	getStatus(activeTools: string[] | "degraded", projectRoot?: string): DelegateStatus;
 	patchConfig(key: string, rawValue: string): string | null;
+	patchProjectConfig(projectRoot: string, key: string, rawValue: string): string | null;
 	paths(): DelegatePaths;
 }

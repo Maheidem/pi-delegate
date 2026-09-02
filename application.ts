@@ -33,10 +33,8 @@ import type {
 	SessionEntryLike,
 } from "./types.ts";
 import { decodeTranscriptRecord } from "./types.ts";
-import { applyProjectOverlay, clampTimeoutMs, normalizeConfig, saveConfig, type DelegateConfigV1 } from "./config.ts";
+import { applyProjectOverlay, clampConfigField, formatDuration, normalizeConfig, parseDuration, projectConfigPath, resolveRunTimeouts, saveConfig, saveProjectConfig, type DelegateConfigV1 } from "./config.ts";
 import { EMPTY_USAGE } from "./types.ts";
-
-const MIN_INACTIVITY = 1_000;
 import { isRoleName, resolveRole, rolePromptExists, DELEGATE_ROLES } from "./roles.ts";
 import {
 	replayModeEntries,
@@ -116,12 +114,31 @@ export class DelegateApplicationImpl implements DelegateApplication {
 	patchConfig(key: string, rawValue: string): string | null {
 		const current = this.liveConfig as unknown as Record<string, unknown>;
 		if (!(key in current)) return `Unknown setting '${key}'.`;
-		const num = Number(rawValue);
-		if (!Number.isFinite(num)) return "Value must be a number.";
+		const num = parseSettingValue(rawValue);
+		if (num === null) return settingParseError(rawValue);
 		try {
 			const { config } = normalizeConfig({ ...current, [key]: num });
 			saveConfig(this.ports.agentDir, config);
 			this.liveConfig = config;
+			return null;
+		} catch (error) {
+			return `Save failed: ${(error as Error).message}`;
+		}
+	}
+
+	/**
+	 * Live-edit one numeric knob of the PROJECT overlay file
+	 * (`<root>/.pi/delegate/config.json`): merged in, only the given key
+	 * changes, clamped by the same bounds as the user config.
+	 */
+	patchProjectConfig(projectRoot: string, key: string, rawValue: string): string | null {
+		if (!projectRoot) return "No project root available.";
+		const num = parseSettingValue(rawValue);
+		if (num === null) return settingParseError(rawValue);
+		const clamped = clampConfigField(key, num);
+		if (clamped === null) return `Unknown setting '${key}'.`;
+		try {
+			saveProjectConfig(projectRoot, { [key]: clamped } as Partial<DelegateConfigV1>);
 			return null;
 		} catch (error) {
 			return `Save failed: ${(error as Error).message}`;
@@ -199,19 +216,16 @@ export class DelegateApplicationImpl implements DelegateApplication {
 			baseCfg = { ...(rest as unknown as DelegateConfigV1) } as DelegateConfigV1;
 		}
 
-		// Per-invocation timeout overrides the config-cascade value, clamped
-		// to the configured bounds; inactivity scales to match. A per-run
-		// copy is used so the override never leaks into later runs.
-		const cfg: DelegateConfigV1 = request.timeoutMs !== undefined
-			? {
-				...baseCfg,
-				hardTimeoutMs: clampTimeoutMs(request.timeoutMs),
-				inactivityTimeoutMs: Math.min(
-					baseCfg.inactivityTimeoutMs,
-					Math.max(MIN_INACTIVITY, Math.floor(clampTimeoutMs(request.timeoutMs) / 2)),
-				),
-			}
-			: baseCfg;
+		// Timeout resolution: per-invocation > project > user (baseCfg carries
+		// the project overlay). Inactivity is capped at half of hard for ANY
+		// source, so a long-silent child can never outlive its watchdog. A
+		// per-run copy so overrides never leak into later runs.
+		const timeouts = resolveRunTimeouts(baseCfg, request.timeoutMs);
+		const cfg: DelegateConfigV1 = {
+			...baseCfg,
+			hardTimeoutMs: timeouts.hardMs,
+			inactivityTimeoutMs: timeouts.inactivityMs,
+		};
 
 		// 2. Validate task (line endings, blank, byte limit).
 		const taskResult = validateTask(request.task, cfg.maxTaskBytes);
@@ -344,17 +358,45 @@ export class DelegateApplicationImpl implements DelegateApplication {
 
 	// ── Status ─────────────────────────────────────────────────────────────
 
-	getStatus(activeTools: string[] | "degraded"): DelegateStatus {
+	getStatus(activeTools: string[] | "degraded", projectRoot?: string): DelegateStatus {
 		const cfg = this.liveConfig;
 		const runs = listRuns(this.ports.agentDir, 10);
 		const active = this.activeRun;
 		const last = runs.find((r) => r.runId !== active?.id) ?? runs[0];
+		let timeouts: DelegateStatus["timeouts"] = {
+			hardMs: cfg.hardTimeoutMs,
+			inactivityMs: cfg.inactivityTimeoutMs,
+			source: "user",
+			userHardMs: cfg.hardTimeoutMs,
+			userInactivityMs: cfg.inactivityTimeoutMs,
+		};
+		if (projectRoot) {
+			const overlay = applyProjectOverlay(cfg, projectRoot) as unknown as DelegateConfigV1 & {
+				projectOverrides: string[];
+				projectCorrupt?: string;
+			};
+			const { projectOverrides, projectCorrupt, ...rest } = overlay;
+			const eff = rest as unknown as DelegateConfigV1;
+			const projectSetsHard = projectOverrides.includes("hardTimeoutMs");
+			timeouts = {
+				hardMs: eff.hardTimeoutMs,
+				inactivityMs: eff.inactivityTimeoutMs,
+				source: projectSetsHard ? "project" : "user",
+				userHardMs: cfg.hardTimeoutMs,
+				userInactivityMs: cfg.inactivityTimeoutMs,
+				...(projectSetsHard ? { projectHardMs: eff.hardTimeoutMs } : {}),
+				projectPath: projectConfigPath(projectRoot),
+				projectOverrides,
+				...(projectCorrupt ? { projectCorrupt } : {}),
+			};
+		}
 		return {
 			modeEnabled: this.isStrict(),
 			activeTools: this.isStrict() ? ["delegate"] : activeTools,
 			activeRun: active ? { runId: active.id, role: active.role, startedAt: active.startedAt } : null,
 			lastRun: last ? { runId: last.runId, role: last.role, state: last.state, finishedAt: last.finishedAt, durationMs: last.durationMs } : null,
 			defaultRole: cfg.defaultRole,
+			timeouts,
 			store: pathsForAgentDir(this.ports.agentDir),
 		};
 	}
@@ -483,6 +525,30 @@ export class DelegateApplicationImpl implements DelegateApplication {
 	/** Startup: stale nonterminal receipts become crashed; never kills PIDs. */
 	markOrphansOnStartup(): string[] {
 		return markOrphanedRuns(this.ports.agentDir);
+	}
+}
+
+/** Parse a dashboard input: bare ms number or a duration string. */
+function parseSettingValue(raw: string): number | null {
+	const trimmed = (raw ?? "").trim();
+	if (!trimmed) return null;
+	if (/^\d+$/.test(trimmed)) return Number(trimmed);
+	try {
+		const parsed = parseDuration(trimmed);
+		return parsed === undefined ? null : parsed;
+	} catch {
+		return null;
+	}
+}
+
+function settingParseError(raw: string): string {
+	const trimmed = (raw ?? "").trim();
+	if (!trimmed) return "Value is empty.";
+	try {
+		parseDuration(trimmed);
+		return "Value must be a duration (e.g. 30m, 2h, 1d) or bare ms.";
+	} catch (error) {
+		return (error as Error).message;
 	}
 }
 

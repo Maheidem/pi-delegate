@@ -21,7 +21,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
-import { loadConfig, parseDuration, saveConfig } from "./config.ts";
+import { formatDuration, loadConfig, parseDuration, saveConfig } from "./config.ts";
 import { parseDelegateCommand, delegateCompletions, type DelegateIntent } from "./commands.ts";
 import { DELEGATE_ROLES, isRoleName, resolveRole } from "./roles.ts";
 import { STRICT_OVERLAY, syncStrictToolSet, resetBlockedCounters } from "./mode.ts";
@@ -467,7 +467,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 	};
 
 	const statusText = (ctx: ExtensionContext): string => {
-		const s = app.getStatus(pi.getActiveTools());
+		const s = app.getStatus(pi.getActiveTools(), ctx.cwd ?? process.cwd());
 		const lines = ["[delegate]", `mode: ${s.modeEnabled ? "strict" : "normal"}`];
 		lines.push(`parent tools: ${s.modeEnabled ? "delegate only" : "normal active set"}`);
 		lines.push(`active run: ${s.activeRun ? `${s.activeRun.runId} (${s.activeRun.role})` : "none"}`);
@@ -478,6 +478,13 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			lines.push("last run: none");
 		}
 		lines.push(`default role: ${s.defaultRole}`);
+		lines.push(
+			`base timeout: ${formatDuration(s.timeouts.hardMs)} hard · ${formatDuration(s.timeouts.inactivityMs)} idle ` +
+			(s.timeouts.source === "project" ? `(project ${s.timeouts.projectPath})` : "(user-wide)"),
+		);
+		if (s.timeouts.projectCorrupt) {
+			lines.push(`warning: project config corrupt, user values used: ${s.timeouts.projectCorrupt}`);
+		}
 		lines.push(`store: ${s.store.runsDir}`);
 		if (app.getModeRuntime().persistenceDegraded) lines.push("warning: mode persistence is degraded");
 		if (!s.modeEnabled) {
@@ -600,10 +607,11 @@ export default function delegateExtension(pi: ExtensionAPI) {
 
 	// ── Dashboard (§12.2) ───────────────────────────────────────────────────
 
-	const dashboardSnapshot = (): PanelSnapshot => {
-		const s = app.getStatus(pi.getActiveTools());
+	const dashboardSnapshot = (projectRoot?: string): PanelSnapshot => {
+		const s = app.getStatus(pi.getActiveTools(), projectRoot);
 		const active = s.activeRun;
 		const last = s.lastRun;
+		const t = s.timeouts;
 		return {
 			title: "Delegation",
 			summaryLines: [
@@ -612,6 +620,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 				`Active run       ${active ? `${active.runId.slice(0, 24)} (${active.role})` : "none"}`,
 				`Last run         ${last ? `${last.role} · ${last.state}${last.durationMs != null ? ` · ${Math.round(last.durationMs / 1000)}s` : ""}` : "none"}`,
 				`Default role     ${s.defaultRole}`,
+				`Base timeout     ${formatDuration(t.hardMs)} hard · ${formatDuration(t.inactivityMs)} idle (${t.source === "project" ? "project" : "user-wide"})`,
 			],
 			sections: [
 				{
@@ -623,6 +632,38 @@ export default function delegateExtension(pi: ExtensionAPI) {
 						{ key: "inspect-last", label: "Inspect last run", value: "", kind: "action", disabled: !last && !active },
 						{ key: "paths", label: "Paths / diagnostics", value: "", kind: "action" },
 						{ key: "doctor", label: "Doctor", value: "", kind: "action" },
+					],
+				},
+				{
+					title: "Timeouts (base)",
+					rows: [
+						{
+							key: "timeout-user",
+							label: "Hard · user-wide",
+							value: formatDuration(t.userHardMs),
+							rawValue: formatDuration(t.userHardMs),
+							kind: "input",
+							inputHint: "e.g. 30m / 2h / 1d — saves ~/.pi/agent/delegate/config.json",
+						},
+						{
+							key: "timeout-project",
+							label: "Hard · project",
+							value: t.projectHardMs !== undefined ? formatDuration(t.projectHardMs) : "not set",
+							rawValue: t.projectHardMs !== undefined ? formatDuration(t.projectHardMs) : "",
+							kind: "input",
+							inputHint: `merges into ${t.projectPath ?? ".pi/delegate/config.json"} (this key only)`,
+						},
+						{
+							key: "idle-user",
+							label: "Idle · user-wide",
+							value: formatDuration(t.userInactivityMs),
+							rawValue: formatDuration(t.userInactivityMs),
+							kind: "input",
+							inputHint: "no-output watchdog; capped at ½ of the hard timeout",
+						},
+						...(t.projectCorrupt
+							? [{ key: "project-corrupt", label: "Project config", value: "corrupt — user values used", kind: "info" as const, valueStyle: "warning" as const }]
+							: []),
 					],
 				},
 			],
@@ -642,8 +683,19 @@ export default function delegateExtension(pi: ExtensionAPI) {
 							theme,
 							keybindings,
 							initialKey,
-							snapshot: dashboardSnapshot,
-							apply: () => null,
+							snapshot: () => dashboardSnapshot(ctx.cwd ?? process.cwd()),
+							apply: (key: string, raw: string): string | null => {
+								switch (key) {
+									case "timeout-user":
+										return app.patchConfig("hardTimeoutMs", raw);
+									case "idle-user":
+										return app.patchConfig("inactivityTimeoutMs", raw);
+									case "timeout-project":
+										return app.patchProjectConfig(ctx.cwd ?? process.cwd(), "hardTimeoutMs", raw);
+									default:
+										return `Unknown setting '${key}'.`;
+								}
+							},
 							activate: (key): PanelActionResult => ({ kind: "close", action: key }),
 							requestRender: () => tui.requestRender(),
 							done,
