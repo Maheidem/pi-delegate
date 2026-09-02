@@ -195,7 +195,17 @@ export interface TranscriptRecordV1 {
 	sequence: number;
 	receivedAt: string;
 	stream: "stdout";
-	rawBase64: string;
+	/** UTF-8 text of the raw record (the normal case — readable). */
+	raw?: string;
+	/** Base64 fallback when the bytes are not valid UTF-8. */
+	rawBase64?: string;
+}
+
+/** Decode a captured transcript record back to its original text. */
+export function decodeTranscriptRecord(record: TranscriptRecordV1): string {
+	if (typeof record.raw === "string") return record.raw;
+	if (typeof record.rawBase64 === "string") return Buffer.from(record.rawBase64, "base64").toString("utf8");
+	return "";
 }
 
 export interface DelegatePaths {

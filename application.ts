@@ -29,8 +29,10 @@ import type {
 	RunInspection,
 	RunMetadataV1,
 	RunnerOutcome,
+	TranscriptRecordV1,
 	SessionEntryLike,
 } from "./types.ts";
+import { decodeTranscriptRecord } from "./types.ts";
 import { normalizeConfig, saveConfig, type DelegateConfigV1 } from "./config.ts";
 import { EMPTY_USAGE } from "./types.ts";
 import { isRoleName, resolveRole, rolePromptExists, DELEGATE_ROLES } from "./roles.ts";
@@ -295,7 +297,7 @@ export class DelegateApplicationImpl implements DelegateApplication {
 		if (!metadata) throw Object.assign(new Error(`Unknown run id '${id}'.`), { code: "E_RUN_NOT_FOUND" });
 		const inspection: RunInspection = { metadata };
 		if (includeTranscript) {
-			inspection.transcriptPreview = boundedPreview(metadata.transcriptPath, 12000);
+			inspection.transcriptPreview = transcriptPreview(metadata.transcriptPath, 12000);
 			inspection.stderrPreview = boundedPreview(metadata.stderrPath, 4000);
 		}
 		return inspection;
@@ -458,6 +460,42 @@ export class DelegateApplicationImpl implements DelegateApplication {
 
 function isTerminal(state: string): boolean {
 	return ["succeeded", "failed", "cancelled", "timed_out_idle", "timed_out_hard", "crashed"].includes(state);
+}
+
+/**
+ * Read a transcript envelope back as readable text: decode each record
+ * (UTF-8 `raw`, or base64 fallback for non-UTF-8 evidence), bounded.
+ */
+function transcriptPreview(filePath: string, maxChars: number): string {
+	try {
+		const buf = fs.readFileSync(filePath);
+		if (buf.length > 200_000) {
+			// Bound the work on huge transcripts: decode the newest records.
+			const lines = buf.toString("utf8").split("\n");
+			const tail = lines.slice(-Math.max(1, Math.floor(200_000 / 200))).filter((l) => l.trim());
+			return decodeTranscriptLines(tail, maxChars, tail.length < lines.filter((l) => l.trim()).length);
+		}
+		const lines = buf.toString("utf8").split("\n").filter((l) => l.trim());
+		return decodeTranscriptLines(lines, maxChars, false);
+	} catch {
+		return "";
+	}
+}
+
+function decodeTranscriptLines(lines: string[], maxChars: number, hadMore: boolean): string {
+	const decoded = lines
+		.map((line) => {
+			try {
+				const rec = JSON.parse(line) as TranscriptRecordV1;
+				return decodeTranscriptRecord(rec);
+			} catch {
+				return line; // non-envelope line kept verbatim
+			}
+		})
+		.filter((t) => t.length > 0);
+	let text = decoded.join("\n");
+	if (text.length > maxChars) text = `${text.slice(0, maxChars)}\n… [truncated]`;
+	return hadMore ? `… [earlier records omitted]\n${text}` : text;
 }
 
 function boundedPreview(filePath: string, maxBytes: number): string {

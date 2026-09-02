@@ -157,14 +157,16 @@ process.stdin.on("data", (c) => {
 	assert.ok(res.details.outputTruncated);
 	assert.ok(res.handoff.includes("truncated"));
 	assert.ok(Buffer.byteLength(res.handoff, "utf8") <= 2000 + 64);
-	// full transcript on disk, not in handoff (base64 envelope records)
+	// full transcript on disk, not in handoff (UTF-8 envelope records)
+	const { decodeTranscriptRecord } = await import("../types.ts");
 	const txRecords = fs
 		.readFileSync(res.details.transcriptPath, "utf8")
 		.split("\n")
 		.filter(Boolean)
-		.map((l) => JSON.parse(l) as { rawBase64: string });
-	const rawAll = txRecords.map((r) => Buffer.from(r.rawBase64, "base64").toString("utf8")).join("");
+		.map((l) => JSON.parse(l) as import("../types.ts").TranscriptRecordV1);
+	const rawAll = txRecords.map(decodeTranscriptRecord).join("");
 	assert.ok(rawAll.includes("Y".repeat(1000)));
+	assert.ok(txRecords.every((r) => typeof r.raw === "string" && r.rawBase64 === undefined), "valid UTF-8 records stay readable");
 });
 
 test("app: cancel defaults to active; unrelated id rejected", async () => {

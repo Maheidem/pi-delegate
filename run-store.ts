@@ -128,13 +128,26 @@ export function appendTranscriptRecord(
 	receivedAt: string,
 	rawBytes: Buffer,
 ): void {
-	const record: TranscriptRecordV1 = {
-		schemaVersion: 1,
-		sequence,
-		receivedAt,
-		stream: "stdout",
-		rawBase64: rawBytes.toString("base64"),
-	};
+	let record: TranscriptRecordV1;
+	try {
+		// Normal case: the child emits valid UTF-8 JSON — keep it readable.
+		record = {
+			schemaVersion: 1,
+			sequence,
+			receivedAt,
+			stream: "stdout",
+			raw: new TextDecoder("utf-8", { fatal: true }).decode(rawBytes),
+		};
+	} catch {
+		// Non-UTF-8 evidence is preserved verbatim, never dropped.
+		record = {
+			schemaVersion: 1,
+			sequence,
+			receivedAt,
+			stream: "stdout",
+			rawBase64: rawBytes.toString("base64"),
+		};
+	}
 	const line = JSON.stringify(record) + "\n";
 	const fd = (stdoutStream as unknown as { fd: number | null }).fd;
 	if (typeof fd === "number") {
