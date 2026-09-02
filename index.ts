@@ -41,6 +41,78 @@ import { RunningView, type RunningViewState } from "./ui/running-view.ts";
 /** Stable command-driven handoff custom message type (§6.4). */
 const HANDOFF_CUSTOM_TYPE = "delegate-handoff";
 
+/**
+ * Compact expanded view of a finished run for the TUI: Outcome section,
+ * first lines of Changes/Verification/Risks, and the child's last actions.
+ * Pure string → string so it is unit-testable without a Pi session.
+ */
+export function formatRunSummary(
+	res: DelegateRunResult,
+	options?: { maxLines?: number },
+): string {
+	const maxLines = options?.maxLines ?? 14;
+	const d = res.details;
+	const lines: string[] = [];
+
+	if (!res.ok) {
+		const err = res.error ? `${res.error.code}: ${res.error.message}` : "unknown failure";
+		lines.push(`error: ${err}`);
+	} else {
+		const handoffLines = res.handoff.split("\n");
+		const sections: Array<{ name: string; lines: string[] }> = [];
+		for (const line of handoffLines) {
+			const h = /^##\s+(.*)$/.exec(line);
+			if (h) {
+				sections.push({ name: h[1].trim(), lines: [] });
+			} else if (sections.length > 0) {
+				sections[sections.length - 1].lines.push(line);
+			}
+		}
+		if (sections.length === 0) {
+			// No structured headings — show the first few non-empty lines.
+			let shown = 0;
+			for (const line of handoffLines) {
+				if (!line.trim()) continue;
+				lines.push(line);
+				if (++shown >= 6) break;
+			}
+		} else {
+			for (const s of sections) {
+				lines.push(`## ${s.name}`);
+				if (s.name === "Outcome") {
+					lines.push(...s.lines);
+				} else {
+					let kept = 0;
+					for (const line of s.lines) {
+						if (!line.trim()) continue;
+						lines.push(line);
+						if (++kept >= 2) break;
+					}
+				}
+			}
+		}
+	}
+
+	const actions = (d.displayItems ?? [])
+		.map((i) => (i.type === "text" ? i.text : `tool ${i.name}`))
+		.filter(Boolean);
+	if (actions.length > 0) {
+		lines.push("", "last actions:");
+		for (const action of actions.slice(-5)) lines.push(`  · ${action}`);
+	}
+
+	if (d.outputTruncated || d.stderrPath) {
+		lines.push("", `[Full transcript: ${d.transcriptPath}]`);
+	}
+
+	const out = lines.join("\n").split("\n");
+	if (out.length > maxLines) {
+		const head = out.slice(0, Math.max(1, maxLines - 1));
+		return [...head, `… (${out.length - head.length} more lines — see transcript)`].join("\n");
+	}
+	return out.join("\n");
+}
+
 export default function delegateExtension(pi: ExtensionAPI) {
 	// 1. The child never reactivates this extension (POL: no recursion).
 	if (process.env.PI_DELEGATE_CHILD === "1") return;
@@ -239,20 +311,29 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			return new Text(theme?.fg ? theme.fg("accent", text) : text, 0, 0);
 		},
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		renderResult(result: any, _options: any, theme: any) {
-			const d = result.details as { runId?: string; role?: string; state?: string; usage?: { input?: number; output?: number; cost?: number }; outputTruncated?: boolean; transcriptPath?: string } | undefined;
+		renderResult(result: any, options: any, theme: any) {
+			const d = result.details as DelegateDetails | undefined;
 			if (!d?.runId) {
 				const text = (result.content ?? []).map((c: { text?: string }) => c.text ?? "").filter(Boolean).join("\n");
 				return new Text(text || "(no output)", 0, 0);
 			}
+			const fg = (kind: string, s: string) => (theme?.fg ? theme.fg(kind, s) : s);
 			const u = d.usage ?? {};
 			const bits: string[] = [`${d.role ?? "?"} · ${d.state ?? "?"}`];
 			if (u.input) bits.push(`↑${u.input}`);
 			if (u.output) bits.push(`↓${u.output}`);
 			if (u.cost) bits.push(`$${u.cost.toFixed(4)}`);
 			const header = `→ ${d.runId}`;
-			const body = bits.join(" ") + (d.outputTruncated && d.transcriptPath ? `\ntranscript: ${d.transcriptPath}` : "");
-			return new Text(theme?.fg ? `${theme.fg("accent", header)}\n${body}` : `${header}\n${body}`, 0, 0);
+			if (!options?.expanded) {
+				const body = bits.join(" ") + (d.outputTruncated && d.transcriptPath ? `\ntranscript: ${d.transcriptPath}` : "");
+				return new Text(`${fg("accent", header)}\n${body}`, 0, 0);
+			}
+			// Expanded: compact summary — Outcome + key lines + last actions.
+			const res = result as unknown as DelegateRunResult;
+			const summary = formatRunSummary(res);
+			const stateColor = d.state === "succeeded" ? "success" : d.state === "cancelled" ? "muted" : "warning";
+			const body = bits.join(" ") + (summary ? `\n${summary}` : "");
+			return new Text(`${fg("accent", header)}\n${fg(stateColor, body)}`, 0, 0);
 		},
 	});
 

@@ -23,7 +23,7 @@ export interface RpcRecord {
 export type RpcRecordClassification =
 	| { kind: "prompt_response"; ok: boolean; id: string }
 	| { kind: "message_end"; stopReason?: string }
-	| { kind: "tool_event"; phase: "start" | "update" | "end"; toolName?: string }
+	| { kind: "tool_event"; phase: "start" | "update" | "end"; toolName?: string; args?: Record<string, unknown> }
 	| { kind: "agent_settled" }
 	| { kind: "agent_end" }
 	| { kind: "extension_ui_request"; id: string }
@@ -39,6 +39,10 @@ export interface RpcParserOptions {
 }
 
 export const DEFAULT_MAX_RECORD_BYTES = 8 * 1024 * 1024; // 8 MiB
+
+function isArgsObject(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
 export const DEFAULT_MALFORMED_THRESHOLD = 10;
 
 export class RpcJsonlParser {
@@ -145,6 +149,7 @@ export function classifyRpcRecord(record: RpcRecord): RpcRecordClassification {
 				kind: "tool_event",
 				phase: "start",
 				toolName: typeof obj.toolName === "string" ? obj.toolName : undefined,
+				args: isArgsObject(obj.args) ? (obj.args as Record<string, unknown>) : undefined,
 			};
 		case "tool_execution_update":
 			return {

@@ -9,7 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { DelegateRunner, type RunnerConfig } from "../runner.ts";
+import { DelegateRunner, describeToolAction, type RunnerConfig } from "../runner.ts";
 import { openRun, runPaths } from "../run-store.ts";
 import { resolveRole } from "../roles.ts";
 import type { DelegateRequest } from "../types.ts";
@@ -291,4 +291,21 @@ process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "ass
 	const outcome = await runner.run();
 	assert.equal(outcome.state, "failed");
 	assert.equal(outcome.error?.code, "E_RPC_PROTOCOL");
+});
+
+// ── describeToolAction (display-safe last actions) ───────────────────────
+
+test("runner: describeToolAction summarizes common tools", () => {
+	assert.equal(describeToolAction("bash", { command: "npm test" }), "bash npm test");
+	assert.equal(describeToolAction("edit", { path: "/a/b.ts" }), "edit /a/b.ts");
+	assert.equal(describeToolAction("read", { path: "/x" }), "read /x");
+	assert.equal(describeToolAction("grep", { pattern: "foo", path: "src" }), "grep foo src");
+	assert.equal(describeToolAction("ls"), "ls");
+	assert.equal(describeToolAction("mcp", {}), "mcp");
+});
+
+test("runner: describeToolAction truncates long args", () => {
+	const out = describeToolAction("bash", { command: "x".repeat(200) });
+	assert.ok(out.endsWith("…"));
+	assert.ok(Array.from(out).length <= 100);
 });

@@ -408,7 +408,7 @@ export class DelegateRunner {
 			}
 			case "tool_event":
 				if (cls.phase === "start" && cls.toolName) {
-					this.pushAction(`tool ${cls.toolName}`);
+					this.pushAction(describeToolAction(cls.toolName, cls.args));
 					this.pushUpdate(`tool:${cls.toolName}`);
 				}
 				break;
@@ -768,4 +768,39 @@ export class DelegateRunner {
 			}
 		}
 	}
+}
+
+
+/**
+ * Display-safe one-liner for a child tool call (never fed to the model).
+ * Keeps at most ~100 visible chars; args are user-visible command/path
+ * values from the child's own session.
+ */
+export function describeToolAction(toolName: string, args?: Record<string, unknown>): string {
+	const a = (key: string): string => {
+		const v = args?.[key];
+		return typeof v === "string" ? v : "";
+	};
+	let detail = "";
+	switch (toolName) {
+		case "bash":
+			detail = a("command");
+			break;
+		case "read":
+		case "write":
+		case "edit":
+			detail = a("path");
+			break;
+		case "grep":
+		case "find":
+			detail = [a("pattern"), a("path")].filter(Boolean).join(" ");
+			break;
+		case "ls":
+			detail = a("path") || a("command");
+			break;
+		default:
+			detail = "";
+	}
+	const text = detail ? `${toolName} ${detail}` : toolName;
+	return text.length > 100 ? `${text.slice(0, 97)}…` : text;
 }

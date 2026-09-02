@@ -512,3 +512,65 @@ test("store: listRuns sorted newest first with summaries", () => {
 	assert.equal(runs.length, 3);
 	assert.ok(runs[0]!.mtimeMs >= runs[2]!.mtimeMs);
 });
+
+// ── formatRunSummary (expanded TUI view) ─────────────────────────────────
+
+test("summary: structured handoff keeps Outcome + 2 lines per other section", async () => {
+	const { formatRunSummary } = await import("../index.ts");
+	const res = {
+		ok: true,
+		handoff: [
+			"## Outcome", "did the thing",
+			"",
+			"## Changes", "- a.ts: x", "- b.ts: y", "- c.ts: z",
+			"",
+			"## Verification", "- npm test passed", "- typecheck passed", "- lint passed",
+			"",
+			"## Risks and open questions", "none",
+		].join("\n"),
+		details: {
+			displayItems: [{ type: "text", text: "bash npm test" }],
+			outputTruncated: false,
+			stderrPath: "",
+			transcriptPath: "/tmp/t.jsonl",
+		},
+	} as never;
+	const out = formatRunSummary(res);
+	assert.ok(out.includes("## Outcome\ndid the thing"));
+	assert.ok(out.includes("- a.ts: x") && out.includes("- b.ts: y") && !out.includes("- c.ts: z"));
+	assert.ok(out.includes("bash npm test"));
+});
+
+test("summary: unstructured handoff falls back to first lines", async () => {
+	const { formatRunSummary } = await import("../index.ts");
+	const res = {
+		ok: true,
+		handoff: "line1\nline2\nline3",
+		details: { displayItems: [], outputTruncated: false, stderrPath: "", transcriptPath: "/tmp/t.jsonl" },
+	} as never;
+	const out = formatRunSummary(res);
+	assert.ok(out.startsWith("line1\nline2\nline3"));
+});
+
+test("summary: failure shows error code", async () => {
+	const { formatRunSummary } = await import("../index.ts");
+	const res = {
+		ok: false,
+		handoff: "",
+		error: { code: "E_CHILD_MODEL", message: "model exploded" },
+		details: { displayItems: [], outputTruncated: false, stderrPath: "", transcriptPath: "/tmp/t.jsonl" },
+	} as never;
+	assert.ok(formatRunSummary(res).includes("E_CHILD_MODEL: model exploded"));
+});
+
+test("summary: maxLines caps output with a trailer", async () => {
+	const { formatRunSummary } = await import("../index.ts");
+	const res = {
+		ok: true,
+		handoff: "## Outcome\n" + Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n"),
+		details: { displayItems: [], outputTruncated: false, stderrPath: "", transcriptPath: "/tmp/t.jsonl" },
+	} as never;
+	const out = formatRunSummary(res, { maxLines: 14 });
+	assert.ok(out.endsWith("more lines — see transcript)"));
+	assert.equal(out.split("\n").length, 14);
+});
