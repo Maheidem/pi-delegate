@@ -94,6 +94,9 @@ export const EMPTY_USAGE: DelegateUsage = {
 
 export type RunSource = "tool" | "command";
 
+/** Project-wide config path: `<projectRoot>/.pi/delegate/config.json`. */
+export const PROJECT_DELEGATE_CONFIG_REL = ".pi/delegate/config.json";
+
 export interface DelegateRequest {
 	task: string;
 	role: RoleName;
@@ -105,6 +108,10 @@ export interface DelegateRequest {
 	/** Parent thinking level, when available. */
 	thinkingLevel?: string;
 	projectTrusted: boolean;
+	/** Per-invocation hard timeout (ms); overrides the config cascade. */
+	timeoutMs?: number;
+	/** Project root for the project-wide config overlay (optional). */
+	projectRoot?: string;
 }
 
 /** Bounded, parent-visible tool result details (schema v1). */

@@ -42,6 +42,23 @@ is performed by this package.
 
 Any unrecognized first word is shorthand for `run general …`.
 
+### Timeouts
+
+Three levels, highest priority first:
+
+1. **Per-invocation flag** — `--timeout <90s|10m|2h|1d|ms>` anywhere in the
+   task (e.g. `/delegate run general long migration --timeout 2h`). The
+   `delegate` tool exposes the same as its optional `timeout` parameter, so
+   the parent model can extend the budget when it expects a long subtask.
+   Clamped to the configured `hardTimeoutMs` bounds; the inactivity timeout
+   scales to at most half of it.
+2. **Project-wide** — `<project>/.pi/delegate/config.json` overlays the user
+   config field-by-field (only listed keys override; e.g.
+   `{ "hardTimeoutMs": 7200000 }`). A missing or corrupt project file never
+   breaks delegations — user values win and corruption is diagnosed.
+3. **User-wide** — `~/.pi/agent/delegate/config.json`
+   (`hardTimeoutMs` default 30 min, `inactivityTimeoutMs` default 5 min).
+
 Tool (`delegate`) is available to models: same semantics, JSON result with
 `ok`/`handoff`/`details` (usage, paths, state) or structured `error`.
 

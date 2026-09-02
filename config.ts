@@ -176,6 +176,124 @@ export function loadConfig(agentDir: string, configPath?: string): ConfigLoadRes
 	}
 }
 
+/** Clamp a per-invocation timeout into the configured hard-timeout bounds. */
+export function clampTimeoutMs(value: number): number {
+	const min = MIN_VALUES.hardTimeoutMs ?? 1_000;
+	const max = MAX_VALUES.hardTimeoutMs ?? 604_800_000;
+	return Math.min(max, Math.max(min, Math.trunc(value)));
+}
+
+/**
+ * Parse a human duration into milliseconds: "90s", "10m", "2h", "1d",
+ * or a bare number (already ms). Returns undefined for empty input;
+ * throws for malformed values (callers surface a stable error).
+ */
+export function parseDuration(input: string): number | undefined {
+	const text = (input ?? "").trim().toLowerCase();
+	if (!text) return undefined;
+	const m = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)$/.exec(text);
+	if (m) {
+		const value = Number(m[1]);
+		const unit = m[2];
+		const factor = unit === "ms" ? 1 : unit === "s" ? 1_000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000;
+		return Math.round(value * factor);
+	}
+	if (/^\d+$/.test(text)) return Number(text);
+	throw new Error(`invalid duration '${input}' (use e.g. 90s, 10m, 2h, 1d, or bare ms)`);
+}
+
+/**
+ * Project-wide config path for a project root: `<root>/.pi/delegate/config.json`.
+ * The project file is an OPTIONAL overlay: only fields present in it override
+ * the user-wide config; it is never required to be schema-complete.
+ */
+export function projectConfigPath(projectRoot: string): string {
+	return path.join(projectRoot, ".pi", "delegate", "config.json");
+}
+
+/**
+ * Overlay a project-wide config file onto a base config (the user-wide
+ * config in production; the app's live config for injected-config tests).
+ * Project file semantics:
+ *  - missing file → base unchanged (the normal case);
+ *  - corrupt file → diagnosed via `projectCorrupt`, base still wins
+ *    (a broken project file must never break delegations);
+ *  - only keys PRESENT in the project file override (no default backfill);
+ *  - values are clamped by the same min/max bounds as the user config.
+ * Returns a NEW config object; the base is never mutated.
+ */
+export function applyProjectOverlay(
+	base: DelegateConfigV1,
+	projectRoot: string,
+): DelegateConfigV1 & { projectOverrides: string[]; projectCorrupt?: string } {
+	const result: DelegateConfigV1 & { projectOverrides: string[]; projectCorrupt?: string } = {
+		...base,
+		projectOverrides: [],
+	};
+	const pPath = projectConfigPath(projectRoot);
+	let raw: unknown;
+	try {
+		raw = JSON.parse(fs.readFileSync(pPath, "utf8"));
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+			result.projectCorrupt = pPath;
+		}
+		return result;
+	}
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return result;
+	const record = raw as Record<string, unknown>;
+	const known = new Set<string>(Object.keys(DEFAULT_DELEGATE_CONFIG));
+	const overrides: string[] = [];
+	for (const key of Object.keys(record)) {
+		if (key === "schemaVersion") continue;
+		if (!knownKey(key)) continue; // unknown keys in project overlay ignored
+		try {
+			const probe: DelegateConfigV1 = { ...DEFAULT_DELEGATE_CONFIG };
+			applyKnownField(probe, key, record[key]);
+			const next = probe[key as keyof DelegateConfigV1] as number;
+			if (next !== (base[key as keyof DelegateConfigV1] as number)) {
+				result[key as keyof DelegateConfigV1] = next as never;
+				overrides.push(key);
+			}
+		} catch {
+			// invalid value for one key: skip it, keep base value
+		}
+	}
+	result.projectOverrides = overrides;
+	return result;
+}
+
+function knownKey(key: string): boolean {
+	return (Object.keys(DEFAULT_DELEGATE_CONFIG) as string[]).includes(key);
+}
+
+/**
+ * Load the user-wide config, then overlay project-wide values on top.
+ * Convenience wrapper over loadConfig + applyProjectOverlay.
+ */
+export function loadConfigCascade(
+	agentDir: string,
+	projectRoot?: string,
+	configPath?: string,
+): ConfigLoadResult & { projectOverrides: string[]; projectCorrupt?: string } {
+	const base = loadConfig(agentDir, configPath);
+	if (!projectRoot) {
+		return { ...base, projectOverrides: [] };
+	}
+	const overlay = applyProjectOverlay(base.config, projectRoot);
+	const { projectOverrides, projectCorrupt, ...rest } = overlay as unknown as DelegateConfigV1 & {
+		projectOverrides: string[];
+		projectCorrupt?: string;
+	};
+	const config: DelegateConfigV1 = { ...(rest as unknown as DelegateConfigV1) };
+	return {
+		...base,
+		config,
+		projectOverrides: overlay.projectOverrides,
+		projectCorrupt: overlay.projectCorrupt,
+	};
+}
+
 /**
  * Persist config: temp file + fsync + close + rename inside the same
  * directory, mode 0600. Unknown future keys carried in `extraKeys` are

@@ -21,7 +21,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
-import { loadConfig, saveConfig } from "./config.ts";
+import { loadConfig, parseDuration, saveConfig } from "./config.ts";
 import { parseDelegateCommand, delegateCompletions, type DelegateIntent } from "./commands.ts";
 import { DELEGATE_ROLES, isRoleName, resolveRole } from "./roles.ts";
 import { STRICT_OVERLAY, syncStrictToolSet, resetBlockedCounters } from "./mode.ts";
@@ -162,7 +162,13 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		}
 	};
 
-	const buildRequest = (task: string, role: "general" | "research", source: "tool" | "command", ctx: ExtensionContext): DelegateRequest => ({
+	const buildRequest = (
+		task: string,
+		role: "general" | "research",
+		source: "tool" | "command",
+		ctx: ExtensionContext,
+		timeoutMs?: number,
+	): DelegateRequest => ({
 		task,
 		role,
 		source,
@@ -170,6 +176,8 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		parentModel: modelString(ctx),
 		thinkingLevel: thinkingOf(ctx),
 		projectTrusted: ctx.isProjectTrusted(),
+		projectRoot: ctx.cwd ?? process.cwd(),
+		...(timeoutMs !== undefined ? { timeoutMs } : {}),
 	});
 
 	const refreshDoctor = (ctx: ExtensionContext) => {
@@ -257,6 +265,11 @@ export default function delegateExtension(pi: ExtensionAPI) {
 	const DelegateParams = Type.Object({
 		task: Type.String({ minLength: 1 }),
 		role: Type.Optional(Type.Union([Type.Literal("general"), Type.Literal("research")])),
+		timeout: Type.Optional(Type.String({
+			description:
+				"Optional per-run hard timeout, e.g. '90s', '10m', '2h', '1d' or bare ms. " +
+				"Use it when the subtask is expected to run longer than the configured default; it overrides the project/user config base.",
+		})),
 	});
 
 	pi.registerTool({
@@ -276,7 +289,19 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		parameters: DelegateParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			// Strict mode invariant also holds here: only delegate runs anyway.
-			const request = buildRequest(params.task, params.role ?? config.defaultRole, "tool", ctx);
+			let timeoutMs: number | undefined;
+			if (typeof params.timeout === "string" && params.timeout.trim()) {
+				try {
+					timeoutMs = parseDuration(params.timeout);
+				} catch (error) {
+					return {
+						content: [{ type: "text" as const, text: (error as Error).message }],
+						details: {} satisfies Record<string, unknown>,
+						isError: true,
+					};
+				}
+			}
+			const request = buildRequest(params.task, params.role ?? config.defaultRole, "tool", ctx, timeoutMs);
 			refreshDoctor(ctx);
 			const hooks = {
 				abortSignal: signal ?? undefined,
@@ -368,8 +393,8 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		}
 	};
 
-	const runCommandForeground = async (task: string, role: "general" | "research", ctx: ExtensionCommandContext): Promise<void> => {
-		const request = buildRequest(task, role, "command", ctx);
+	const runCommandForeground = async (task: string, role: "general" | "research", ctx: ExtensionCommandContext, timeoutMs?: number): Promise<void> => {
+		const request = buildRequest(task, role, "command", ctx, timeoutMs);
 		refreshDoctor(ctx);
 		let lastText = `[delegate] starting ${role} run…`;
 		const hooks = {
@@ -556,7 +581,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 						say(ctx, `[delegate] invalid role '${intent.role}'. Use general or research.`, "error");
 						return;
 					}
-					await runCommandForeground(intent.task, intent.role, ctx);
+					await runCommandForeground(intent.task, intent.role, ctx, intent.timeoutMs);
 					return;
 				case "invalid":
 					say(ctx, `[delegate] unrecognized '${intent.token}'.\n${intent.usage}\n${helpText()}`, "error");

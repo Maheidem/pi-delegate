@@ -33,8 +33,10 @@ import type {
 	SessionEntryLike,
 } from "./types.ts";
 import { decodeTranscriptRecord } from "./types.ts";
-import { normalizeConfig, saveConfig, type DelegateConfigV1 } from "./config.ts";
+import { applyProjectOverlay, clampTimeoutMs, normalizeConfig, saveConfig, type DelegateConfigV1 } from "./config.ts";
 import { EMPTY_USAGE } from "./types.ts";
+
+const MIN_INACTIVITY = 1_000;
 import { isRoleName, resolveRole, rolePromptExists, DELEGATE_ROLES } from "./roles.ts";
 import {
 	replayModeEntries,
@@ -182,8 +184,26 @@ export class DelegateApplicationImpl implements DelegateApplication {
 			};
 		}
 
-		const cfg = this.liveConfig;
 		const agentDir = this.ports.agentDir;
+		// Config cascade: project .pi/delegate/config.json overlays the
+		// user-wide (live) config per run; missing file = live config.
+		const baseCfg: DelegateConfigV1 = request.projectRoot
+			? applyProjectOverlay(this.liveConfig, request.projectRoot)
+			: this.liveConfig;
+
+		// Per-invocation timeout overrides the config-cascade value, clamped
+		// to the configured bounds; inactivity scales to match. A per-run
+		// copy is used so the override never leaks into later runs.
+		const cfg: DelegateConfigV1 = request.timeoutMs !== undefined
+			? {
+				...baseCfg,
+				hardTimeoutMs: clampTimeoutMs(request.timeoutMs),
+				inactivityTimeoutMs: Math.min(
+					baseCfg.inactivityTimeoutMs,
+					Math.max(MIN_INACTIVITY, Math.floor(clampTimeoutMs(request.timeoutMs) / 2)),
+				),
+			}
+			: baseCfg;
 
 		// 2. Validate task (line endings, blank, byte limit).
 		const taskResult = validateTask(request.task, cfg.maxTaskBytes);

@@ -7,6 +7,7 @@
 
 import type { RoleName } from "./types.ts";
 import { ROLE_NAMES } from "./types.ts";
+import { parseDuration } from "./config.ts";
 
 export type DelegateIntent =
 	| { kind: "dashboard" }
@@ -18,7 +19,7 @@ export type DelegateIntent =
 	| { kind: "help" }
 	| { kind: "cancel"; runId?: string }
 	| { kind: "inspect"; runId?: string }
-	| { kind: "run"; role: RoleName; task: string; explicit: boolean }
+	| { kind: "run"; role: RoleName; task: string; explicit: boolean; timeoutMs?: number }
 	| { kind: "invalid"; token: string; usage: string };
 
 export const DELEGATE_USAGE = [
@@ -33,6 +34,8 @@ export const DELEGATE_USAGE = [
 	"/delegate run <general|research> <task...>   run with an explicit role",
 	"/delegate research <task...>        research-role shorthand",
 	"/delegate <task...>                 general-role shorthand",
+	"flags (run/research/<task>): --timeout <90s|10m|2h|1d|ms>",
+	"timeout priority: per-invocation > project .pi/delegate/config.json > user ~/.pi/agent/delegate/config.json",
 	"/delegate help                      this help",
 ].join("\n");
 
@@ -62,7 +65,9 @@ export function parseDelegateCommand(input: string, options: ParseOptions = {}):
 	if (!RESERVED_FIRST_TOKENS.has(first)) {
 		// General-role shorthand. `research` is reserved, so a general task
 		// that starts with that word must use `run general ...`.
-		return { kind: "run", role: "general", task: trimmed, explicit: false };
+		const { task, timeoutMs } = extractFlags(trimmed);
+		if (!task) return invalid(first);
+		return { kind: "run", role: "general", task, explicit: false, timeoutMs };
 	}
 
 	switch (first) {
@@ -88,21 +93,24 @@ export function parseDelegateCommand(input: string, options: ParseOptions = {}):
 		}
 		case "run": {
 			const rest = trimmed.slice("run".length).trim();
-			const parts = rest.split(/\s+/);
 			if (!rest) return invalid("run");
+			const { task, timeoutMs } = extractFlags(rest);
+			const parts = task.split(/\s+/);
 			const roleToken = parts[0]!;
 			if (roleToken === "general" || roleToken === "research") {
-				const task = parts.slice(1).join(" ").trim();
-				if (!task) return invalid("run");
-				return { kind: "run", role: roleToken, task, explicit: true };
+				const body = parts.slice(1).join(" ").trim();
+				if (!body) return invalid("run");
+				return { kind: "run", role: roleToken, task: body, explicit: true, timeoutMs };
 			}
 			// `run <task...>` — role defaults to general.
-			return { kind: "run", role: "general", task: rest, explicit: true };
+			return { kind: "run", role: "general", task, explicit: true, timeoutMs };
 		}
 		case "research": {
-			const task = trimmed.slice("research".length).trim();
+			const rest = trimmed.slice("research".length).trim();
+			if (!rest) return invalid("research");
+			const { task, timeoutMs } = extractFlags(rest);
 			if (!task) return invalid("research");
-			return { kind: "run", role: "research", task, explicit: true };
+			return { kind: "run", role: "research", task, explicit: true, timeoutMs };
 		}
 	}
 	return invalid(first);
@@ -138,6 +146,35 @@ export function delegateCompletions(prefix: string, recentRunIds: string[] = [])
 	}
 	// De-duplicate, keep order, cap for the TUI.
 	return [...new Set(matches)].slice(0, 10);
+}
+
+/**
+ * Pull `--timeout <duration>` flags out of a task string (any position).
+ * Unknown flags are kept in the task text; a malformed duration yields a
+ * stable error message.
+ */
+export function extractFlags(input: string): { task: string; timeoutMs?: number; error?: string } {
+	const tokens = input.split(/\s+/).filter(Boolean);
+	const kept: string[] = [];
+	let timeoutMs: number | undefined;
+	for (let i = 0; i < tokens.length; i++) {
+		const t = tokens[i]!;
+		if (t === "--timeout") {
+			const value = tokens[i + 1];
+			if (!value) return { task: "", error: "--timeout needs a value (e.g. --timeout 30m)" };
+			try {
+				const parsed = parseDuration(value);
+				if (parsed === undefined) return { task: "", error: "--timeout needs a value (e.g. --timeout 30m)" };
+				timeoutMs = parsed;
+				i += 1;
+			} catch (e) {
+				return { task: "", error: (e as Error).message };
+			}
+			continue;
+		}
+		kept.push(t);
+	}
+	return { task: kept.join(" "), timeoutMs };
 }
 
 /**

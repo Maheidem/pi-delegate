@@ -574,3 +574,100 @@ test("summary: maxLines caps output with a trailer", async () => {
 	assert.ok(out.endsWith("more lines — see transcript)"));
 	assert.equal(out.split("\n").length, 14);
 });
+
+// ── Timeout: duration, flags, cascade ─────────────────────────────────────
+
+test("timeout: parseDuration handles units and bare ms", async () => {
+	const { parseDuration } = await import("../config.ts");
+	assert.equal(parseDuration("90s"), 90_000);
+	assert.equal(parseDuration("10m"), 600_000);
+	assert.equal(parseDuration("2h"), 7_200_000);
+	assert.equal(parseDuration("1d"), 86_400_000);
+	assert.equal(parseDuration("12345"), 12_345);
+	assert.equal(parseDuration(""), undefined);
+	assert.throws(() => parseDuration("soon"));
+});
+
+test("timeout: extractFlags pulls --timeout from any position", async () => {
+	const { extractFlags } = await import("../commands.ts");
+	const a = extractFlags("research a topic --timeout 30m");
+	assert.equal(a.task, "research a topic");
+	assert.equal(a.timeoutMs, 1_800_000);
+	const b = extractFlags("--timeout 1h do the thing");
+	assert.equal(b.task, "do the thing");
+	assert.equal(b.timeoutMs, 3_600_000);
+	const c = extractFlags("no flags here");
+	assert.equal(c.task, "no flags here");
+	assert.equal(c.timeoutMs, undefined);
+	const d = extractFlags("task --timeout");
+	assert.ok(d.error?.includes("--timeout needs a value"));
+	const e = extractFlags("task --timeout soon");
+	assert.ok(e.error?.includes("invalid duration"));
+});
+
+test("timeout: command grammar wires --timeout into run intents", async () => {
+	const { parseDelegateCommand } = await import("../commands.ts");
+	const a = parseDelegateCommand("run general fix the bug --timeout 2h");
+	assert.equal(a.kind, "run");
+	if (a.kind === "run") {
+		assert.equal(a.role, "general");
+		assert.equal(a.task, "fix the bug");
+		assert.equal(a.timeoutMs, 7_200_000);
+	}
+	const b = parseDelegateCommand("research compare approaches --timeout 45m");
+	if (b.kind === "run") {
+		assert.equal(b.role, "research");
+		assert.equal(b.timeoutMs, 2_700_000);
+	}
+	const c = parseDelegateCommand("plain task --timeout 5m");
+	if (c.kind === "run") {
+		assert.equal(c.role, "general");
+		assert.equal(c.task, "plain task");
+		assert.equal(c.timeoutMs, 300_000);
+	}
+});
+
+test("timeout: project config overlays user config field-by-field", async () => {
+	const { loadConfigCascade, projectConfigPath } = await import("../config.ts");
+	const fs = await import("node:fs");
+	const os = await import("node:os");
+	const path = await import("node:path");
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-tmo-"));
+	const agentDir = path.join(dir, "agent");
+	const proj = path.join(dir, "proj");
+	fs.mkdirSync(agentDir, { recursive: true });
+	fs.mkdirSync(path.dirname(projectConfigPath(proj)), { recursive: true });
+	// user config
+	fs.mkdirSync(path.join(agentDir, "delegate"), { recursive: true });
+	fs.writeFileSync(path.join(agentDir, "delegate", "config.json"), JSON.stringify({ schemaVersion: 1, hardTimeoutMs: 600_000, inactivityTimeoutMs: 120_000 }));
+	// project overlay: only hardTimeoutMs
+	fs.writeFileSync(projectConfigPath(proj), JSON.stringify({ hardTimeoutMs: 7_200_000 }));
+	const res = loadConfigCascade(agentDir, proj);
+	assert.equal(res.config.hardTimeoutMs, 7_200_000, "project overrides user");
+	assert.equal(res.config.inactivityTimeoutMs, 120_000, "unlisted keys keep user value");
+	assert.deepEqual(res.projectOverrides, ["hardTimeoutMs"]);
+	// no project file → user config unchanged
+	const res2 = loadConfigCascade(agentDir, path.join(dir, "no-proj"));
+	assert.equal(res2.config.hardTimeoutMs, 600_000);
+	assert.deepEqual(res2.projectOverrides, []);
+	// corrupt project file → user wins, diagnosed
+	fs.writeFileSync(projectConfigPath(proj), "{ not json");
+	const res3 = loadConfigCascade(agentDir, proj);
+	assert.equal(res3.config.hardTimeoutMs, 600_000);
+	assert.ok(res3.projectCorrupt);
+});
+
+test("timeout: project values are clamped by the same bounds", async () => {
+	const { loadConfigCascade, projectConfigPath } = await import("../config.ts");
+	const fs = await import("node:fs");
+	const os = await import("node:os");
+	const path = await import("node:path");
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-tmo-clamp-"));
+	const agentDir = path.join(dir, "agent");
+	const proj = path.join(dir, "proj");
+	fs.mkdirSync(agentDir, { recursive: true });
+	fs.mkdirSync(path.dirname(projectConfigPath(proj)), { recursive: true });
+	fs.writeFileSync(projectConfigPath(proj), JSON.stringify({ hardTimeoutMs: 999_999_999_999 }));
+	const res = loadConfigCascade(agentDir, proj);
+	assert.equal(res.config.hardTimeoutMs, 604_800_000, "clamped to max week");
+});
