@@ -22,6 +22,7 @@ import {
 import { Text } from "@earendil-works/pi-tui";
 
 import { formatDuration, loadConfig, parseDuration, saveConfig } from "./config.ts";
+import * as fsSync from "node:fs";
 import { delegateVersion } from "./version.ts";
 import { HandoffToolParams, validateHandoffSubmission, type HandoffSubmission } from "./handoff.ts";
 import { parseDelegateCommand, delegateCompletions, type DelegateIntent } from "./commands.ts";
@@ -39,6 +40,8 @@ import type {
 } from "./types.ts";
 import { SettingsPanel, type PanelSnapshot, type PanelActionResult } from "./ui/settings-panel.ts";
 import { RunningView, type RunningViewState } from "./ui/running-view.ts";
+import { PeekView } from "./ui/peek-view.ts";
+import { FeedRing, feedEventsFromTranscript, renderFeedEvents } from "./transcript-feed.ts";
 
 /** Stable command-driven handoff custom message type (§6.4). */
 const HANDOFF_CUSTOM_TYPE = "delegate-handoff";
@@ -498,7 +501,20 @@ export default function delegateExtension(pi: ExtensionAPI) {
 				role: request.role,
 				phase: "starting",
 				elapsedMs: 0,
-				lastActions: [],
+				feedLines: [],
+			};
+			// Live feed: every child event lands in the ring; the panel renders
+			// the bounded tail on each host refresh (1 s + event-driven).
+			const feed = new FeedRing(120);
+			let feedStartMs = 0;
+			let hardMs: number | undefined;
+			const feedLines = (): string[] => {
+				if (feed.all().length === 0) return [];
+				return renderFeedEvents([...feed.all()], {
+					startMs: feedStartMs || Date.now(),
+					maxChars: 150,
+					maxEvents: 14,
+				});
 			};
 			const runPromise = app.run(request, {
 				...hooks,
@@ -508,18 +524,44 @@ export default function delegateExtension(pi: ExtensionAPI) {
 					viewState.role = u.role;
 					viewState.phase = u.phase;
 					viewState.elapsedMs = u.elapsedMs;
-					viewState.lastActions = u.lastActions;
+					viewState.model = u.model;
+					viewState.openTools = u.openTools;
+					viewState.turns = u.usage?.turns;
+					viewState.tokens = { input: u.usage?.input, output: u.usage?.output };
+					if (!feedStartMs) feedStartMs = Date.now() - u.elapsedMs;
+				},
+				onEvent: (event) => {
+					feed.push(event);
 				},
 			});
+			// Effective hard cap for the progress bar: per-run > project > user.
+			try {
+				const s = app.getStatus(pi.getActiveTools(), ctx.cwd ?? process.cwd());
+				hardMs = request.timeoutMs ?? s.timeouts.hardMs;
+			} catch {
+				hardMs = undefined;
+			}
+			viewState.hardMs = hardMs;
+			let refreshTimer: ReturnType<typeof setInterval> | undefined;
 			const outcome = await ctx.ui.custom<{ cancelled?: boolean } | undefined>(
-				(tui, theme, keybindings, done) =>
-					new RunningView({
+				(tui, theme, keybindings, done) => {
+					refreshTimer = setInterval(() => {
+						viewState.elapsedMs = feedStartMs ? Date.now() - feedStartMs : viewState.elapsedMs;
+						viewState.feedLines = feedLines();
+						tui.requestRender();
+					}, 1000);
+					return new RunningView({
 						theme,
 						keybindings,
-						state: () => viewState,
+						state: () => {
+							viewState.feedLines = feedLines();
+							return viewState;
+						},
 						done,
-					}),
+					});
+				},
 			);
+			if (refreshTimer) clearInterval(refreshTimer);
 			if (outcome?.cancelled) {
 				await app.cancel();
 				say(ctx, `[delegate] cancellation requested; the run finalizes with its terminal receipt.`);
@@ -680,6 +722,61 @@ export default function delegateExtension(pi: ExtensionAPI) {
 					}
 					await runCommandForeground(intent.task, intent.role, ctx, intent.timeoutMs);
 					return;
+				case "peek": {
+					const id = intent.runId?.trim() || app.mostRecentRunId();
+					if (!id) {
+						say(ctx, "[delegate] no runs to peek at.", "warning");
+						return;
+					}
+					let meta;
+					try {
+						meta = app.inspect(id).metadata;
+					} catch {
+						say(ctx, `[delegate] unknown run '${id}'.`, "error");
+						return;
+					}
+					if (!fsSync.existsSync(meta.transcriptPath)) {
+						say(ctx, `[delegate] no transcript captured for ${id}.`, "warning");
+						return;
+					}
+					if (ctx.mode === "tui") {
+						await ctx.ui.custom<{ closed?: boolean } | undefined>((tui, theme, keybindings, done) => {
+							const state = () => {
+								let live = false;
+								try {
+									live = !["succeeded", "failed", "cancelled", "timed_out_idle", "timed_out_hard", "crashed"].includes(app.inspect(id).metadata.state);
+								} catch {
+									live = false;
+								}
+								const { startMs, events } = feedEventsFromTranscript(meta.transcriptPath, { maxEvents: 400 });
+								return {
+									title: `${id.slice(-16)} · ${meta.role}${meta.model ? ` · ${meta.model}` : ""} · ${meta.state}`,
+									summary: meta.transcriptPath,
+									lines: renderFeedEvents(events, { startMs: startMs || Date.now(), maxChars: 150 }),
+									live,
+								};
+							};
+							// Live-follow refresh timer; cleared the moment the
+							// overlay closes (done wrapper) — never leaks.
+							let timer: ReturnType<typeof setInterval> | undefined;
+							const wrappedDone = (result: { closed?: boolean }) => {
+								if (timer) clearInterval(timer);
+								done(result);
+							};
+							const view = new PeekView({ theme, keybindings, state, done: wrappedDone });
+							timer = setInterval(() => tui.requestRender(), 1000);
+							return view;
+						});
+					} else {
+						const { startMs, events } = feedEventsFromTranscript(meta.transcriptPath, { maxEvents: 400 });
+						const lines = renderFeedEvents(events, { startMs: startMs || Date.now(), maxChars: 200 });
+						say(
+							ctx,
+							`[delegate peek ${id} · ${meta.role} · ${meta.state}]\n${meta.transcriptPath}\n${lines.slice(-40).join("\n")}`,
+						);
+					}
+					return;
+				}
 				case "resume": {
 					const runId = intent.runId?.trim();
 					if (!runId || !intent.task) {

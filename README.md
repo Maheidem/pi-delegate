@@ -118,6 +118,18 @@ Consequences worth internalizing:
   than blamed on the provider, and the stderr tail is no longer presented as
   the cause.
 
+### Watching a child work: the live feed and `/delegate peek`
+
+- **Foreground `/delegate run` (TUI)** opens a live feed panel: identity
+  (`role · model · elapsed · turn N · ↑in ↓out`), an elapsed-vs-hard-cap
+  progress bar, in-flight tools, and a scrolling one-line-per-event feed of
+  the child's activity — `▶ bash npm test` → `✓ … (38s)`, `✎` assistant
+  lines, `⚠` provider errors, `▣` handoff submissions. Escape twice cancels.
+- **`/delegate peek [run-id]`** opens the same feed decoded from the run's
+  captured transcript — live-following (`● live`) while the run is active,
+  scrollable (`j`/`k`, `f` re-follow, `q` close), and equally useful
+  post-mortem on any finished run. Headless/print mode prints the tail.
+
 ### The mandatory structured handoff (protocol, not prompt)
 
 Anything the harness NEEDS from the child is a validated protocol step —

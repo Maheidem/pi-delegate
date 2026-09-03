@@ -26,9 +26,18 @@ function runningState(): RunningViewState {
 	return {
 		runId: "del_20260901T000000Z_deadbeef",
 		role: "general",
-		phase: "running",
+		model: "zai/glm-5.3",
+		phase: "tool:bash",
 		elapsedMs: 12_345,
-		lastActions: ["read file.ts", "edit index.ts"],
+		hardMs: 1_800_000,
+		turns: 7,
+		tokens: { input: 12_345, output: 3_456 },
+		openTools: ["bash"],
+		feedLines: [
+			"+3s ▶ bash npm test",
+			"+41s ✓ bash npm test (38s)",
+			"+52s ✎ ## Outcome — matrix green",
+		],
 	};
 }
 
@@ -52,6 +61,14 @@ test("ui: RunningView renders width-safe at 80/62/20/1", () => {
 		}
 		assert.equal(doneCalled, false);
 	}
+	// At full width the feed is visible: identity, budgets, events.
+	const lines80 = new RunningView({ theme, keybindings, state: runningState, done: () => {} }).render(80);
+	const all80 = lines80.map(strip).join("\n");
+	assert.ok(all80.includes("zai/glm-5.3"), "model echoed");
+	assert.ok(all80.includes("turn 7"), "turn count echoed");
+	assert.ok(all80.includes("npm test"), "feed events rendered");
+	assert.ok(/% of 30m/.test(all80), "hard-cap progress rendered");
+	assert.ok(all80.includes("in flight: bash"), "open tool rendered");
 });
 
 test("ui: RunningView requires two cancels before signalling", () => {
@@ -144,4 +161,118 @@ test("ui: selection preserved across refresh", () => {
 	assert.equal(selAfter, selBefore, "selection stays on same row after refresh");
 	// and the selected row text is identical
 	assert.equal(after[selAfter], before[selBefore]);
+});
+
+// ── PeekView ──────────────────────────────────────────────────────────────
+
+import { PeekView } from "../ui/peek-view.ts";
+
+test("ui: PeekView renders width-safe with live/final modes", () => {
+	const linesOf = (live: boolean) => {
+		const view = new PeekView({
+			theme,
+			keybindings,
+			state: () => ({
+				title: "del_…deadbeef · research · zai/glm-5.3 · running",
+				summary: "/runs/del_x.jsonl",
+				lines: Array.from({ length: 60 }, (_, i) => `+${i}s ▶ bash cmd-${i}`),
+				live,
+			}),
+			done: () => {},
+		});
+		return view.render(80);
+	};
+	for (const live of [true, false]) {
+		const lines = linesOf(live);
+		for (const line of lines) {
+			const len = Array.from(strip(line)).length;
+			assert.ok(len <= 80, `live=${live}: overflow (${len})`);
+		}
+		const all = lines.map(strip).join("\n");
+		assert.ok(all.includes("live — following") || all.includes("final —"), `live=${live}: mode label`);
+		assert.ok(all.includes("earlier event(s)"), `live=${live}: bounded window with scroll hint`);
+		assert.ok(lines.length <= 26, `live=${live}: overlay stays in the panel budget`);
+	}
+});
+
+test("ui: PeekView scrolling disables follow, f re-enables, q closes", () => {
+	let doneArg: { closed?: boolean } | undefined;
+	const state = () => ({
+		title: "t",
+		summary: "s",
+		lines: Array.from({ length: 40 }, (_, i) => `event-${i}`),
+		live: true,
+	});
+	const view = new PeekView({ theme, keybindings, state, done: (r) => (doneArg = r) });
+	const before = view.render(80).map(strip).join("\n");
+	view.handleInput("j"); // scroll up: follow off
+	const after = view.render(80).map(strip).join("\n");
+	assert.ok(after.includes("newer event(s)") || after !== before, "scroll moved the window");
+	view.handleInput("f"); // follow again
+	const refollowed = view.render(80).map(strip).join("\n");
+	assert.ok(refollowed.includes("live — following"), "f re-enables follow");
+	view.handleInput("q");
+	assert.deepEqual(doneArg, { closed: true });
+});
+
+// ── transcript-feed formatting (Pi-free) ─────────────────────────────────
+
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { FeedRing, feedEventsFromTranscript, renderFeedEvents } from "../transcript-feed.ts";
+
+test("feed: renderFeedEvents stamps relative time and marks", () => {
+	const start = Date.parse("2026-09-03T20:00:00Z");
+	const lines = renderFeedEvents(
+		[
+			{ atMs: start + 3000, kind: "tool_start", tool: "bash", detail: "npm test" },
+			{ atMs: start + 41_000, kind: "tool_end", tool: "bash", detail: "all green", durationMs: 38_000 },
+			{ atMs: start + 52_000, kind: "tool_end", tool: "edit", detail: "boom", isError: true },
+			{ atMs: start + 60_000, kind: "assistant", detail: "## Outcome — done" },
+			{ atMs: start + 61_000, kind: "provider_error", detail: "usage limit reached" },
+			{ atMs: start + 62_000, kind: "handoff", detail: "handoff submitted (done)" },
+		],
+		{ startMs: start },
+	);
+	assert.match(lines[0] ?? "", /\+3s ▶ bash npm test/);
+	assert.match(lines[1] ?? "", /\+41s ✓ bash all green \(38s\)/);
+	assert.match(lines[2] ?? "", /✗ edit boom/);
+	assert.match(lines[3] ?? "", /✎ ## Outcome — done/);
+	assert.match(lines[4] ?? "", /⚠ usage limit reached/);
+	assert.match(lines[5] ?? "", /▣ handoff submitted \(done\)/);
+});
+
+test("feed: ring keeps a bounded window", () => {
+	const ring = new FeedRing(5);
+	for (let i = 0; i < 12; i++) ring.push({ atMs: i, kind: "info", detail: `e${i}` });
+	assert.equal(ring.all().length, 5);
+	assert.equal(ring.all()[0]?.detail, "e7");
+});
+
+test("feed: transcript decode → events (raw + base64 eras)", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "feed-"));
+	const file = path.join(dir, "t.jsonl");
+	const t0 = "2026-09-03T20:00:00.000Z";
+	const recs = [
+		{ schemaVersion: 1, sequence: 0, receivedAt: t0, stream: "stdout", raw: JSON.stringify({ type: "tool_execution_start", toolCallId: "a", toolName: "bash", args: { command: "npm test" } }) },
+		{ schemaVersion: 1, sequence: 1, receivedAt: "2026-09-03T20:00:05.000Z", stream: "stdout", raw: JSON.stringify({ type: "tool_execution_end", toolCallId: "a", toolName: "bash", result: { content: [{ type: "text", text: "ok" }] } }) },
+		// 0.1.0-era base64 envelope
+		{ schemaVersion: 1, sequence: 2, receivedAt: "2026-09-03T20:00:07.000Z", stream: "stdout", rawBase64: Buffer.from(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "## Outcome\nsecond line" }], stopReason: "stop" } })).toString("base64") },
+		{ schemaVersion: 1, sequence: 3, receivedAt: "2026-09-03T20:00:08.000Z", stream: "stdout", raw: JSON.stringify({ type: "agent_settled" }) },
+	];
+	fs.writeFileSync(file, recs.map((r) => JSON.stringify(r)).join("\n"));
+	const { startMs, events } = feedEventsFromTranscript(file);
+	assert.equal(events.length, 4);
+	assert.equal(events[0]?.kind, "tool_start");
+	assert.equal(events[0]?.detail, "npm test");
+	assert.equal(events[1]?.kind, "tool_end");
+	assert.equal(events[1]?.durationMs, 5000);
+	assert.equal(events[2]?.kind, "assistant");
+	assert.equal(events[2]?.detail, "## Outcome");
+	assert.equal(events[3]?.kind, "settled");
+	assert.ok(Number.isFinite(startMs));
+	// missing file → empty feed, no throw
+	const missing = feedEventsFromTranscript(path.join(dir, "nope.jsonl"));
+	assert.equal(missing.events.length, 0);
 });

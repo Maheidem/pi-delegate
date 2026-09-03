@@ -27,6 +27,7 @@ import { classifyRpcRecord, RpcJsonlParser, type RpcRecord } from "./rpc-jsonl.t
 import { appendTranscriptRecord, updateRunMetadata, type OpenedRun } from "./run-store.ts";
 import { formatDuration } from "./config.ts";
 import { renderHandoff, validateHandoffSubmission, type HandoffSubmission } from "./handoff.ts";
+import type { FeedEvent } from "./transcript-feed.ts";
 
 export interface RunnerConfig {
 	maxResultBytes: number;
@@ -242,6 +243,12 @@ export class DelegateRunner {
 	private lastAssistant: AssistantFinal | null = null;
 	/** R1: toolCallIds with a start but no matching end yet. */
 	private openToolCalls = new Set<string>();
+	/** Feed: toolCallId → start ms (for end-event durations). */
+	private toolStartedAt = new Map<string, number>();
+	/** Feed: toolCallId → tool name. */
+	private toolNames = new Map<string, string>();
+	/** Feed: toolCallId → the start event's arg detail (path/command). */
+	private toolDetails = new Map<string, string>();
 	/** R2: handoff negotiation phase after a timeout cancel. */
 	private handoffPhase: "none" | "await-settle" | "await-handoff" = "none";
 	/** Structured handoff captured from the child's `handoff` tool call. */
@@ -500,19 +507,70 @@ export class DelegateRunner {
 			case "message_end": {
 				const message = (record.parsed as { message?: unknown }).message;
 				this.ingestMessage(message, cls.stopReason);
+				const m = message as { role?: string; stopReason?: string; errorMessage?: string; content?: Array<{ type?: string; text?: string }> } | null;
+				if (m?.role === "assistant") {
+					if (m.stopReason === "error") {
+						this.emitEvent({
+							atMs: Date.now(),
+							kind: "provider_error",
+							detail: (m.errorMessage ?? "").trim() || "provider error (no message)",
+						});
+					} else {
+						const text = (m.content ?? []).find((b) => b?.type === "text" && b.text?.trim())?.text ?? "";
+						if (text.trim()) {
+							this.emitEvent({
+								atMs: Date.now(),
+								kind: "assistant",
+								detail: text.split("\n").filter(Boolean)[0] ?? "",
+							});
+						}
+					}
+				}
 				break;
 			}
 			case "tool_event":
 				// R1: track open tool calls (start/end pairs by toolCallId).
 				if (cls.id) {
-					if (cls.phase === "start") this.openToolCalls.add(cls.id);
-					else if (cls.phase === "end") this.openToolCalls.delete(cls.id);
+					if (cls.phase === "start") {
+						this.openToolCalls.add(cls.id);
+						this.toolStartedAt.set(cls.id, Date.now());
+						if (cls.toolName) this.toolNames.set(cls.id, cls.toolName);
+						this.toolDetails.set(cls.id, feedDetailFor(cls.toolName ?? "", cls.args));
+					} else if (cls.phase === "end") {
+						this.openToolCalls.delete(cls.id);
+						this.toolStartedAt.delete(cls.id);
+						this.toolNames.delete(cls.id);
+						this.toolDetails.delete(cls.id);
+					}
 					// a tool event resets the watchdog to the right budget
 					this.armInactivity();
 				}
 				if (cls.phase === "start" && cls.toolName) {
 					this.pushAction(describeToolAction(cls.toolName, cls.args));
 					this.pushUpdate(`tool:${cls.toolName}`);
+					this.emitEvent({
+						atMs: Date.now(),
+						kind: "tool_start",
+						tool: cls.toolName,
+						detail: feedDetailFor(cls.toolName, cls.args),
+					});
+				}
+				if (cls.phase === "end" && cls.toolName && cls.id) {
+					const started = this.toolStartedAt.get(cls.id);
+					// Echo the start's arg detail (path/command); bash keeps
+					// its output head — file-content heads are noise.
+					const argDetail = this.toolDetails.get(cls.id) ?? "";
+					const head = cls.result?.textHead ?? "";
+					const detail =
+						cls.toolName === "bash" && head ? head.slice(0, 70) : (argDetail || head.slice(0, 70) || "done");
+					this.emitEvent({
+						atMs: Date.now(),
+						kind: "tool_end",
+						tool: cls.toolName,
+						detail,
+						isError: cls.result?.isError === true,
+						...(started ? { durationMs: Date.now() - started } : {}),
+					});
 				}
 				// Structured handoff: the child's mandatory final report rides
 				// on the handoff tool result details — capture it verbatim
@@ -520,11 +578,19 @@ export class DelegateRunner {
 				if (cls.phase === "end" && cls.toolName === "handoff") {
 					const candidate = (cls.result?.details as { delegateHandoff?: unknown } | undefined)?.delegateHandoff;
 					const validation = validateHandoffSubmission(candidate);
-					if (validation.ok) this.structuredHandoff = validation.value ?? null;
+					if (validation.ok) {
+						this.structuredHandoff = validation.value ?? null;
+						this.emitEvent({
+							atMs: Date.now(),
+							kind: "handoff",
+							detail: `handoff submitted (${validation.value?.outcome ?? "?"})`,
+						});
+					}
 				}
 				break;
 			case "agent_settled":
 				this.settled = true;
+				this.emitEvent({ atMs: Date.now(), kind: "settled", detail: "agent settled" });
 				this.finalizeSettled();
 				break;
 			case "agent_end":
@@ -1056,6 +1122,25 @@ export class DelegateRunner {
 		if (this.lastActions.length > 10) this.lastActions.shift();
 	}
 
+	/** Names of tools currently in flight (for live views). */
+	private openToolNames(): string[] {
+		const names = new Set<string>();
+		for (const id of this.openToolCalls) {
+			const name = this.toolNames.get(id);
+			if (name) names.add(name);
+		}
+		return [...names];
+	}
+
+	/** Live feed fan-out (unthrottled; views bound what they keep). */
+	private emitEvent(event: FeedEvent): void {
+		try {
+			this.hooks.onEvent?.(event);
+		} catch {
+			// feed failures never affect the run
+		}
+	}
+
 	private pushUpdate(phase: "starting" | "running" | `tool:${string}` | "finalizing"): void {
 		if (!this.hooks.onUpdate) return;
 		const now = Date.now();
@@ -1066,6 +1151,7 @@ export class DelegateRunner {
 			role: this.req.role.name,
 			phase,
 			model: this.req.parentModel,
+			openTools: this.openToolNames(),
 			elapsedMs: this.startedAtMs ? now - this.startedAtMs : 0,
 			lastActions: this.lastActions.slice(-5),
 			usage: { ...this.usage, turns: this.turns },
@@ -1217,6 +1303,18 @@ export function gitDeltaSince(cwd: string, _since?: string): string | null {
 	}
 	if (parts.length === 0) return null;
 	return parts.join("\n").slice(0, 4000);
+}
+
+/** Feed detail for a tool start: command/path head (display-safe). */
+function feedDetailFor(toolName: string, args?: Record<string, unknown>): string {
+	const a = (key: string): string => {
+		const v = args?.[key];
+		return typeof v === "string" ? v : "";
+	};
+	const v = a("command") || a("path") || a("pattern") || a("query");
+	if (v) return v.replace(/\s+/g, " ").slice(0, 90);
+	if (toolName === "handoff") return "structured submission";
+	return "";
 }
 
 /**

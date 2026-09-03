@@ -530,6 +530,25 @@ async function main() {
 		}
 	}
 
+	// ── Scenario K: peek — transcript feed for a finished run ─────────
+	{
+		if (runScenario("K")) {
+		const dir = makeWorkspace();
+		const pi = startPi(dir);
+		await pi.prompt(
+			"/delegate run general Run this exact bash command and wait for it: sleep 2. Then submit via the handoff tool with outcome done and summary exactly: PEEK-OK.",
+			480_000,
+		);
+		const run = latestReceipt();
+		ok(run?.state === "succeeded", `K: run succeeded (${run?.state})`);
+		await pi.prompt(`/delegate peek ${run.runId}`);
+		const t = pi.allText();
+		ok(/✓|▶/.test(t), "K: peek renders the activity feed (tool marks)");
+		ok(t.includes("sleep 2"), "K: peek shows the child's command");
+		await stop(pi);
+		}
+	}
+
 	// ── Scenario J: R7 — version provenance in status ─────────────────
 	{
 		if (runScenario("J")) {

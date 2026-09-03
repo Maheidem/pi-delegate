@@ -20,6 +20,7 @@ export type DelegateIntent =
 	| { kind: "cancel"; runId?: string }
 	| { kind: "inspect"; runId?: string }
 	| { kind: "resume"; runId?: string; task: string; timeoutMs?: number }
+	| { kind: "peek"; runId?: string }
 	| { kind: "run"; role: RoleName; task: string; explicit: boolean; timeoutMs?: number }
 	| { kind: "invalid"; token: string; usage: string };
 
@@ -32,6 +33,7 @@ export const DELEGATE_USAGE = [
 	"/delegate doctor                    diagnostics (no LLM call)",
 	"/delegate cancel [run-id]           cancel the active (or matching) run",
 	"/delegate resume <run-id> <task...>  continue a prior run's child session",
+	"/delegate peek [run-id]             live/final feed of a run's child activity",
 	"/delegate inspect [run-id]          show run metadata (defaults to latest)",
 	"/delegate run <general|research> <task...>   run with an explicit role",
 	"/delegate research <task...>        research-role shorthand",
@@ -51,6 +53,7 @@ const RESERVED_FIRST_TOKENS = new Set([
 	"cancel",
 	"inspect",
 	"resume",
+	"peek",
 	"run",
 	"research",
 ]);
@@ -94,6 +97,10 @@ export function parseDelegateCommand(input: string, options: ParseOptions = {}):
 			const rest = trimmed.slice("inspect".length).trim();
 			return { kind: "inspect", runId: rest || undefined };
 		}
+		case "peek": {
+			const rest = trimmed.slice("peek".length).trim();
+			return { kind: "peek", runId: rest || undefined };
+		}
 		case "resume": {
 			const rest = trimmed.slice("resume".length).trim();
 			if (!rest) return invalid("resume");
@@ -136,7 +143,7 @@ function invalid(token: string): DelegateIntent {
 export function delegateCompletions(prefix: string, recentRunIds: string[] = []): string[] {
 	const words = (prefix ?? "").trimStart();
 	const tokens = words.split(/\s+/);
-	const base: string[] = ["on", "off", "status", "paths", "doctor", "help", "cancel ", "inspect ", "resume ", "run ", "research "];
+	const base: string[] = ["on", "off", "status", "paths", "doctor", "help", "cancel ", "inspect ", "resume ", "peek ", "run ", "research "];
 
 	const matches: string[] = [];
 	if (tokens.length <= 1) {
@@ -150,7 +157,7 @@ export function delegateCompletions(prefix: string, recentRunIds: string[] = [])
 		for (const role of ROLE_NAMES) {
 			if (role.startsWith(p)) matches.push(`${role} `);
 		}
-	} else if (tokens[0] === "cancel" || tokens[0] === "inspect" || tokens[0] === "resume") {
+	} else if (tokens[0] === "cancel" || tokens[0] === "inspect" || tokens[0] === "resume" || tokens[0] === "peek") {
 		const p = tokens[1] ?? "";
 		for (const id of recentRunIds) {
 			if (id.startsWith(p)) matches.push(`${id} `);

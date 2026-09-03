@@ -22,6 +22,7 @@ export interface DelegateRole {
 }
 
 import type { HandoffSubmission } from "./handoff.ts";
+import type { FeedEvent } from "./transcript-feed.ts";
 
 // ── Errors ────────────────────────────────────────────────────────────────
 
@@ -375,6 +376,8 @@ export interface RunStreamUpdate {
 	phase: "starting" | "running" | `tool:${string}` | "finalizing";
 	/** R5: the resolved child model, echoed in live updates. */
 	model?: string;
+	/** Live feed: tool names with a start but no end yet. */
+	openTools?: string[];
 	elapsedMs: number;
 	lastActions: string[];
 	usage: DelegateUsage;
@@ -382,6 +385,8 @@ export interface RunStreamUpdate {
 
 export type RunHooks = {
 	onUpdate?: (update: RunStreamUpdate) => void;
+	/** Live feed events for the running panel and peek views (every event, unthrottled). */
+	onEvent?: (event: FeedEvent) => void;
 	abortSignal?: AbortSignal;
 };
 

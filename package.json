@@ -1,6 +1,6 @@
 {
 	"name": "@maheidem/pi-delegate",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"type": "module",
 	"description": "Foreground isolated delegation and strict coordinator mode for the Pi coding agent.",
 	"license": "MIT",
@@ -37,7 +37,8 @@
 		"run-store.ts",
 		"types.ts",
 		"version.ts",
-    "handoff.ts",
+		"handoff.ts",
+		"transcript-feed.ts",
 		"roles/",
 		"ui/",
 		"README.md",
