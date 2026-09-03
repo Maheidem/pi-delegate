@@ -400,7 +400,7 @@ test("truncate: 75/25 head-tail with marker, UTF-8 safe", () => {
 
 // ── child argv builder ───────────────────────────────────────────────────
 
-test("child args: task never in argv; rpc/no-session/model/tools present", () => {
+test("child args: task never in argv; rpc/session-dir/model/tools present", () => {
 	const role = resolveRole("research", "general");
 	const { args } = buildChildArgs(
 		{
@@ -417,7 +417,8 @@ test("child args: task never in argv; rpc/no-session/model/tools present", () =>
 	);
 	assert.equal(args.some((a) => a.includes("SECRET TASK TEXT")), false);
 	assert.ok(args.includes("--mode") && args.includes("rpc"));
-	assert.ok(args.includes("--no-session"));
+	assert.ok(args.includes("--session-dir"));
+	assert.ok(!args.includes("--no-session"), "sessions must be durable (R3)");
 	assert.ok(args.includes("--model"));
 	assert.ok(args.includes("--tools"));
 	assert.ok(!args.some((a) => a === "--auto-approve"));
@@ -790,12 +791,12 @@ test("timeout: formatDuration renders human units", async () => {
 test("timeout: resolveRunTimeouts caps inactivity at half of hard", async () => {
 	const { resolveRunTimeouts, DEFAULT_DELEGATE_CONFIG } = await import("../config.ts");
 	const base = { ...DEFAULT_DELEGATE_CONFIG, hardTimeoutMs: 30 * 60_000, inactivityTimeoutMs: 5 * 60_000 };
-	// no override: unchanged (5m < 15m cap)
-	assert.deepEqual(resolveRunTimeouts(base), { hardMs: 30 * 60_000, inactivityMs: 5 * 60_000 });
+	// no override: unchanged (5m < 15m cap); stuck-tool defaults to hard (R1)
+	assert.deepEqual(resolveRunTimeouts(base), { hardMs: 30 * 60_000, inactivityMs: 5 * 60_000, stuckToolMs: 30 * 60_000, hardSource: "config" });
 	// per-invocation 8m: inactivity capped to 4m
-	assert.deepEqual(resolveRunTimeouts(base, 8 * 60_000), { hardMs: 8 * 60_000, inactivityMs: 4 * 60_000 });
+	assert.deepEqual(resolveRunTimeouts(base, 8 * 60_000), { hardMs: 8 * 60_000, inactivityMs: 4 * 60_000, stuckToolMs: 8 * 60_000, hardSource: "per-run" });
 	// per-invocation 2h: inactivity stays 5m
-	assert.deepEqual(resolveRunTimeouts(base, 2 * 3_600_000), { hardMs: 2 * 3_600_000, inactivityMs: 5 * 60_000 });
+	assert.deepEqual(resolveRunTimeouts(base, 2 * 3_600_000), { hardMs: 2 * 3_600_000, inactivityMs: 5 * 60_000, stuckToolMs: 2 * 3_600_000, hardSource: "per-run" });
 	// per-invocation clamped to bounds
 	assert.equal(resolveRunTimeouts(base, 999).hardMs, 1_000, "min clamp");
 	assert.equal(resolveRunTimeouts(base, 10 ** 15).hardMs, 604_800_000, "max clamp");
@@ -831,4 +832,13 @@ test("timeout: clampConfigField rejects unknown keys, clamps bounds", async () =
 	assert.equal(clampConfigField("hardTimeoutMs", 10), 1_000);
 	assert.equal(clampConfigField("defaultRole", 5), null);
 	assert.equal(clampConfigField("nope", 5), null);
+});
+
+// ── R7: version provenance ───────────────────────────────────────────────
+
+test("R7: delegateVersion matches package.json", async () => {
+	const { delegateVersion } = await import("../version.ts");
+	const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+	assert.equal(delegateVersion(), pkg.version);
+	assert.notEqual(delegateVersion(), "unknown");
 });

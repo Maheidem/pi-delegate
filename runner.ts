@@ -26,12 +26,21 @@ import { EMPTY_USAGE } from "./types.ts";
 import { classifyRpcRecord, RpcJsonlParser, type RpcRecord } from "./rpc-jsonl.ts";
 import { appendTranscriptRecord, updateRunMetadata, type OpenedRun } from "./run-store.ts";
 import { formatDuration } from "./config.ts";
+import { renderHandoff, validateHandoffSubmission, type HandoffSubmission } from "./handoff.ts";
 
 export interface RunnerConfig {
 	maxResultBytes: number;
 	inactivityTimeoutMs: number;
 	hardTimeoutMs: number;
 	killGraceMs: number;
+	/** R2: grace for the killed child's final handoff answer (default 90 s). */
+	handoffGraceMs?: number;
+	/** Bounded wait for a child to answer the mandatory-handoff enforcement
+	 * prompt (default 60 s) — independent of the hard timeout, so a child
+	 * that goes silent after settling can never dangle the run for hours. */
+	handoffEnforceTimeoutMs?: number;
+	/** R1: watchdog budget while a tool call is in flight (default: hard). */
+	stuckToolTimeoutMs?: number;
 	updateThrottleMs: number;
 	maxRecordBytes?: number;
 	malformedThreshold?: number;
@@ -73,16 +82,31 @@ export interface RunnerSpawnRequest {
 	projectTrusted: boolean;
 	/** Registered tool names in the parent process (for role ceiling preflight). */
 	registeredTools: readonly string[];
+	/** R3: prior run whose child session this run resumes ("--session <file>"). */
+	resumeOf?: string;
+	/** R3: child session file to re-enter (resume mode); new runs use --session-dir. */
+	sessionPath?: string;
+	/** R3: directory the child's session file is persisted to (new runs). */
+	sessionDir?: string;
 }
 
 export function buildChildArgs(
 	req: RunnerSpawnRequest,
 	role: DelegateRole,
 ): { args: string[]; env: NodeJS.ProcessEnv; promptId: string } {
-	const toolList = role.tools.join(",");
+	// The mandatory structured-handoff tool is always in the child's
+	// ceiling; the delegate extension registers it in child mode.
+	const toolList = [...role.tools, "handoff"].join(",");
+	// R3: the child's session is DURABLE. New runs persist it under the run
+	// store (--session-dir); resumed runs re-enter the prior session file
+	// directly (--session <file>) so a killed run can be continued in the
+	// same context instead of a cold re-explained child.
+	const sessionArgs = req.sessionPath
+		? ["--session", req.sessionPath]
+		: ["--session-dir", req.sessionDir ?? ".pi-sessions"];
 	const args: string[] = [
 		"--mode", "rpc",
-		"--no-session",
+		...sessionArgs,
 		"--model", req.parentModel,
 	];
 	if (req.thinkingLevel) args.push("--thinking", req.thinkingLevel);
@@ -99,14 +123,38 @@ export function buildChildArgs(
 	return { args, env, promptId: `delegate:${req.runId}:prompt` };
 }
 
-function buildPromptMessage(runId: string, role: string, task: string): string {
+function buildPromptMessage(runId: string, role: string, task: string, resumeOf?: string): string {
+	const resumeNote = resumeOf
+		? `You are RESUMING the child session of run ${resumeOf} (its earlier turns are in your context). Continue from where that run left off.\n`
+		: "";
 	return (
 		`[delegated child run · id=${runId} · role=${role}]\n` +
+		resumeNote +
 		`This task came from a parent Pi session. Work only on this task.\n` +
 		`Do not delegate or attempt to contact the parent during execution.\n` +
 		`Follow the role output contract exactly.\n\n` +
 		`<delegated-task>\n${task}\n</delegated-task>`
 	);
+}
+
+/** R2: the bounded termination-notice prompt a timed-out child must answer
+ * through the handoff TOOL (deterministic capture), with a free-text
+ * fallback only if the tool path is unavailable in an older child. */
+export function buildHandoffPrompt(runId: string): string {
+	return (
+		`[delegate ${runId} · termination notice]\n` +
+		`You are being terminated NOW. Call the handoff tool IMMEDIATELY with outcome "partial":\n` +
+		`- summary: what you completed so far\n` +
+		`- changes: every file you created/modified so far\n` +
+		`- verification: last test/typecheck state (or not_run)\n` +
+		`- remaining: precise next steps for a successor\n` +
+		`Do not start new work. If the handoff tool is unavailable, reply in plain text with those four sections.`
+	);
+}
+
+/** R4: provider-error artifacts produced by our own abort, not the provider. */
+export function isAbortArtifactErrorMessage(message: string): boolean {
+	return /this operation was aborted|request was aborted|operation aborted/i.test(message);
 }
 
 /**
@@ -156,6 +204,8 @@ function displaySafeArgValue(value: unknown, limit = 80): string {
 interface AssistantFinal {
 	text: string;
 	stopReason?: string;
+	/** R4: provider errorMessage captured from the final message_end, verbatim. */
+	errorMessage?: string;
 	usage: DelegateUsage;
 }
 
@@ -190,6 +240,19 @@ export class DelegateRunner {
 	private promptAccepted = false;
 	private settled = false;
 	private lastAssistant: AssistantFinal | null = null;
+	/** R1: toolCallIds with a start but no matching end yet. */
+	private openToolCalls = new Set<string>();
+	/** R2: handoff negotiation phase after a timeout cancel. */
+	private handoffPhase: "none" | "await-settle" | "await-handoff" = "none";
+	/** Structured handoff captured from the child's `handoff` tool call. */
+	private structuredHandoff: HandoffSubmission | null = null;
+	/** Bounded enforcement prompts when the child settled without submitting. */
+	private handoffEnforceAttempts = 0;
+	private static readonly HANDOFF_ENFORCE_MAX = 2;
+	private handoffEnforceTimer: NodeJS.Timeout | null = null;
+	private handoffGraceTimer: NodeJS.Timeout | null = null;
+	private handoffSettleTimer: NodeJS.Timeout | null = null;
+	private killEscalateTimer: NodeJS.Timeout | null = null;
 	private usage: DelegateUsage = { ...EMPTY_USAGE };
 	private turns = 0;
 	private exitCode: number | null = null;
@@ -256,6 +319,12 @@ export class DelegateRunner {
 		const { args, env } = buildChildArgs(this.req, role);
 		const launchArgs = [...invocation.args, ...args];
 
+		// R6: worktree checkpoint at run start (BEFORE spawn — no sync work
+		// may sit between spawn and stream wiring; a fast-exiting child
+		// would otherwise win the race to close stdin). Post-death
+		// inspection becomes `git diff <gitBase>` instead of re-reading.
+		const gitBase = gitCheckpoint(this.req.cwd);
+
 		let child: childProcess.ChildProcess;
 		try {
 			child = childProcess.spawn(invocation.command, launchArgs, {
@@ -275,7 +344,14 @@ export class DelegateRunner {
 		this.child = child;
 		this.startedAt = new Date().toISOString();
 		this.startedAtMs = Date.now();
-		this.updateMetadata({ state: "starting", pid: child.pid, startedAt: this.startedAt });
+		this.updateMetadata({
+			state: "starting",
+			pid: child.pid,
+			startedAt: this.startedAt,
+			...(this.req.resumeOf ? { resumeOf: this.req.resumeOf } : {}),
+			...(this.req.sessionPath ? { sessionPath: this.req.sessionPath } : {}),
+			...(gitBase ? gitBase : {}),
+		});
 
 		// Wire streams BEFORE the prompt; stdout records are captured raw first.
 		child.stdout?.on("data", (chunk: Buffer) => this.onStdout(chunk));
@@ -319,8 +395,13 @@ export class DelegateRunner {
 		this.hardTimer = setTimeout(() => this.cancel("timed_out_hard"), this.cfg.hardTimeoutMs);
 		this.hardTimer.unref();
 
+		// A fast-exiting child closes stdin before/as the prompt is written;
+		// the resulting EPIPE must never escape as an unhandled stream error
+		// (the exit handler already finalizes the run).
+		child.stdin?.on("error", () => {});
+
 		// Send the single prompt over RPC stdin.
-		const promptMessage = buildPromptMessage(this.runId, role.name, this.req.task);
+		const promptMessage = buildPromptMessage(this.runId, role.name, this.req.task, this.req.resumeOf);
 		const promptRecord = JSON.stringify({ id: this.promptId, type: "prompt", message: promptMessage });
 		try {
 			child.stdin?.write(`${promptRecord}\n`);
@@ -340,19 +421,33 @@ export class DelegateRunner {
 
 	private onStdout(chunk: Buffer): void {
 		this.noteActivity();
+		this.lastStreamActivityMs = Date.now();
 		const records = this.parser.feed(chunk);
 		for (const record of records) this.handleRecord(record);
 	}
+
+	/** R2: last stdout timestamp — the settle wait re-arms while the child
+	 * is still streaming its post-abort message instead of killing it. */
+	private lastStreamActivityMs = 0;
+	private cancelRequestedAtMs: number | null = null;
 
 
 	private noteActivity(): void {
 		this.armInactivity();
 	}
 
+	/** R1: in-flight tool calls count as activity — the watchdog switches to
+	 * the (much longer) stuck-tool budget while a tool call is open, so a
+	 * legitimate long-running tool (test matrix, benchmark, soak) is never
+	 * idle-killed mid-execution. A genuinely hung child with NO open tool
+	 * still hits the normal inactivity budget. */
 	private armInactivity(): void {
 		if (this.finalizing || !this.child) return;
 		if (this.inactivityTimer) clearTimeout(this.inactivityTimer);
-		this.inactivityTimer = setTimeout(() => this.cancel("timed_out_idle"), this.cfg.inactivityTimeoutMs);
+		const budget = this.openToolCalls.size > 0
+			? this.cfg.stuckToolTimeoutMs ?? this.cfg.hardTimeoutMs
+			: this.cfg.inactivityTimeoutMs;
+		this.inactivityTimer = setTimeout(() => this.cancel("timed_out_idle"), budget);
 		this.inactivityTimer.unref();
 	}
 
@@ -408,9 +503,24 @@ export class DelegateRunner {
 				break;
 			}
 			case "tool_event":
+				// R1: track open tool calls (start/end pairs by toolCallId).
+				if (cls.id) {
+					if (cls.phase === "start") this.openToolCalls.add(cls.id);
+					else if (cls.phase === "end") this.openToolCalls.delete(cls.id);
+					// a tool event resets the watchdog to the right budget
+					this.armInactivity();
+				}
 				if (cls.phase === "start" && cls.toolName) {
 					this.pushAction(describeToolAction(cls.toolName, cls.args));
 					this.pushUpdate(`tool:${cls.toolName}`);
+				}
+				// Structured handoff: the child's mandatory final report rides
+				// on the handoff tool result details — capture it verbatim
+				// (re-validated; a stale/malformed payload is ignored).
+				if (cls.phase === "end" && cls.toolName === "handoff") {
+					const candidate = (cls.result?.details as { delegateHandoff?: unknown } | undefined)?.delegateHandoff;
+					const validation = validateHandoffSubmission(candidate);
+					if (validation.ok) this.structuredHandoff = validation.value ?? null;
 				}
 				break;
 			case "agent_settled":
@@ -452,17 +562,27 @@ export class DelegateRunner {
 			.join("\n\n");
 		const reason =
 			typeof m.stopReason === "string" ? m.stopReason : stopReason;
+		// R4: the provider's own error text rides on message_end.errorMessage —
+		// capture it verbatim (e.g. "Codex error: The usage limit has been
+		// reached", or abort artifacts like "This operation was aborted").
+		const errorMessage = typeof m.errorMessage === "string" ? m.errorMessage : undefined;
 		this.lastAssistant = {
 			text,
 			stopReason: reason,
+			...(errorMessage ? { errorMessage } : {}),
 			usage: { ...this.usage },
 		};
 	}
 
 	/**
-	 * One idempotent cancel path (§9.11): mark → RPC abort → 2 s → SIGTERM →
-	 * grace (5 s default via killGraceMs) → SIGKILL. Finalizes metadata once
-	 * and removes all listeners/timers.
+	 * R2 — timeout cancellation with a graceful handoff attempt:
+	 *  1. RPC `abort` (ends the in-flight tool/turn, exactly as before);
+	 *  2. wait (bounded, 5 s) for the child to settle;
+	 *  3. send the termination-notice prompt; wait `handoffGraceMs`;
+	 *  4. capture the child's final answer as `partialHandoff`;
+	 *  5. SIGTERM → killGrace → SIGKILL (the old path, as fallback).
+	 * A user/parent `cancelled` keeps the OLD fast path (2 s → SIGTERM):
+	 * the caller asked to stop, not to negotiate.
 	 */
 	cancel(state: RunTerminalState): void {
 		if (this.finalizing) return;
@@ -471,6 +591,7 @@ export class DelegateRunner {
 		const byUser = state === "cancelled";
 		if (byUser) this.cancelledByUser = true;
 		this.cancelRequested = state;
+		this.cancelRequestedAtMs = Date.now();
 		const child = this.child;
 		if (!child) {
 			this.finish(state);
@@ -483,7 +604,43 @@ export class DelegateRunner {
 				// fall through to signals
 			}
 		}
-		setTimeout(() => {
+		if (byUser) {
+			// Fast path (unchanged): 2 s → SIGTERM → grace → SIGKILL.
+			this.startKillEscalation(2000);
+			return;
+		}
+		// Timeout path: negotiate a partial handoff, bounded at every step.
+		this.handoffPhase = "await-settle";
+		this.armHandoffSettleWait(this.startedAtMs ? Date.now() : Date.now());
+	}
+
+	/**
+	 * R2: wait (bounded) for the child to settle after the abort. A real
+	 * child often keeps streaming its interrupted turn for several seconds
+	 * after the abort (observed: ≥5 s of message_update deltas) — while it
+	 * is still producing output we re-arm instead of killing mid-sentence.
+	 */
+	private armHandoffSettleWait(_startedAt: number): void {
+		const stepMs = 5000;
+		const capMs = 45_000;
+		this.handoffSettleTimer = setTimeout(() => {
+			if (this.finalizing || this.handoffPhase !== "await-settle") return;
+			const quiet = Date.now() - this.lastStreamActivityMs;
+			if (quiet < 3000 && Date.now() - (this.cancelRequestedAtMs ?? Date.now()) < capMs) {
+				this.armHandoffSettleWait(_startedAt);
+				return;
+			}
+			// Child never settled after the abort — no negotiation possible.
+			this.handoffPhase = "none";
+			this.startKillEscalation(0);
+		}, stepMs);
+		this.handoffSettleTimer.unref();
+	}
+
+	/** SIGTERM → killGrace → SIGKILL escalation (one shared implementation). */
+	private startKillEscalation(delayMs: number): void {
+		if (this.finalizing) return;
+		this.killEscalateTimer = setTimeout(() => {
 			if (this.finalizing || !this.child?.kill) return;
 			try {
 				this.child.kill("SIGTERM");
@@ -498,13 +655,63 @@ export class DelegateRunner {
 					// ignore
 				}
 			}, this.cfg.killGraceMs);
-		}, 2000);
-		// If the child never exits, the kill path above plus the exit handler
-		// covers it; the hard timer is already armed as a last backstop.
+		}, delayMs);
+		this.killEscalateTimer.unref();
+	}
+
+	/** R2: the child settled after our abort — offer it the handoff prompt. */
+	private beginHandoffPrompt(): void {
+		this.handoffPhase = "await-handoff";
+		try {
+			this.child?.stdin?.write(
+				`${JSON.stringify({ id: `${this.runId}:handoff`, type: "prompt", message: buildHandoffPrompt(this.runId) })}\n`,
+			);
+		} catch {
+			// child gone — fall back to the kill path
+			this.handoffPhase = "none";
+			this.startKillEscalation(0);
+			return;
+		}
+		const grace = this.cfg.handoffGraceMs ?? 90_000;
+		this.handoffGraceTimer = setTimeout(() => {
+			// Grace exhausted — finalize with whatever we already captured.
+			this.handoffPhase = "none";
+			if (!this.finalizing) {
+				this.startKillEscalation(0);
+				if (this.cancelRequested) this.finish(this.cancelRequested, undefined, this.partialHandoffExtra());
+			}
+		}, grace);
+		this.handoffGraceTimer.unref();
+	}
+
+	/** R2: build the partial-handoff `extra`. The structured submission
+	 * (from the handoff tool) wins; free text is the fallback. */
+	private partialHandoffExtra(): { handoff?: string; truncated?: boolean; partialHandoff?: string } | undefined {
+		if (this.structuredHandoff) {
+			return { partialHandoff: renderHandoff(this.structuredHandoff, { partial: true }) };
+		}
+		const text = this.lastAssistant?.text?.trim();
+		if (!text) return undefined;
+		const { text: bounded, truncated } = truncateHandoff(text, this.cfg.maxResultBytes);
+		return { partialHandoff: bounded, truncated };
 	}
 
 	private finalizeSettled(): void {
 		if (this.finalizing) return;
+		// R2: a timeout cancellation negotiates a partial handoff BEFORE it
+		// finalizes. Settles arriving during the negotiation belong to the
+		// handoff exchange, not to the run outcome.
+		if (this.cancelRequested && this.handoffPhase === "await-settle") {
+			this.beginHandoffPrompt();
+			return;
+		}
+		if (this.cancelRequested && this.handoffPhase === "await-handoff") {
+			// The child answered the termination-notice prompt — finalize with
+			// whatever it wrote as the partial handoff.
+			this.handoffPhase = "none";
+			this.finish(this.cancelRequested, undefined, this.partialHandoffExtra());
+			return;
+		}
 		// A cancellation is already finalizing via the exit path (§9.7) — an
 		// aborted turn legitimately has no final text and must not overwrite
 		// the cancellation with E_NO_HANDOFF.
@@ -516,21 +723,102 @@ export class DelegateRunner {
 			return;
 		}
 		if (final?.stopReason === "error") {
+			// R4 — precise provider-error diagnosis. The provider's own text
+			// rides on message_end.errorMessage; quote it verbatim. Abort
+			// artifacts (our own watchdog abort surfacing as stop=error) are
+			// classified as killed-by-watchdog, not blamed on the provider.
+			// The stderr tail is NEVER presented as the cause — it is routinely
+			// unrelated noise (e.g. model-discovery notices about user config).
+			const providerMessage = final.errorMessage?.trim();
+			if (providerMessage && !isAbortArtifactErrorMessage(providerMessage)) {
+				this.finish("failed", {
+					code: "E_PROVIDER_ERROR",
+					message: `Provider error: ${providerMessage}`,
+				});
+				return;
+			}
+			if (providerMessage) {
+				this.finish("failed", {
+					code: "E_CHILD_MODEL",
+					message: `Child aborted mid-request (${providerMessage}); typically a watchdog/timeout kill landing mid-generation, not a provider fault.`,
+				});
+				return;
+			}
 			this.finish("failed", {
 				code: "E_CHILD_MODEL",
-				message: `Child model stopped with an error (stderr tail: ${this.stderrTail()})`,
+				message: `Child model stopped with an error (no provider message on the final message; unrelated stderr tail: ${this.stderrTail()})`,
 			});
 			return;
 		}
+		// Protocol enforcement: the child MUST submit the structured handoff
+		// via the handoff tool. A settle without it is re-prompted (bounded);
+		// after the budget is spent the free-text ending is accepted with a
+		// diagnostic note (older children without the tool still finish).
+		if (
+			!this.structuredHandoff &&
+			this.handoffEnforceAttempts < DelegateRunner.HANDOFF_ENFORCE_MAX &&
+			final?.text.trim()
+		) {
+			this.handoffEnforceAttempts += 1;
+			let written = false;
+			try {
+				this.child?.stdin?.write(
+					`${JSON.stringify({
+						id: `${this.runId}:handoff-required`,
+						type: "prompt",
+						message:
+							`[delegate ${this.runId} · handoff required]\n` +
+							`Your run ended WITHOUT the mandatory handoff tool call. Call the handoff tool NOW with your structured result ` +
+							`(outcome, summary, changes, verification, remaining, risks). Do not write free text; the run does not complete without it.`,
+					})}\n`,
+				);
+				written = true;
+			} catch {
+				// child gone — finalize on what we have
+			}
+			if (written) {
+				// DEADLOCK GUARD: the child already finished its work; if it
+				// never answers the enforcement prompt (older child, hung
+				// model), finalize with the free-text fallback after a SHORT
+				// bound — never the remaining hard budget.
+				if (this.handoffEnforceTimer) clearTimeout(this.handoffEnforceTimer);
+				this.handoffEnforceTimer = setTimeout(() => {
+					if (this.finalizing) return;
+					this.handoffPhase = "none";
+					this.finalizeFreeTextFallback();
+				}, this.cfg.handoffEnforceTimeoutMs ?? 60_000);
+				this.handoffEnforceTimer.unref();
+				return; // wait for the enforcement turn to settle
+			}
+		}
 		if (!final || !final.text.trim()) {
+			if (this.structuredHandoff) {
+				// Tool submitted but the child never wrote a closing message:
+				// the structured submission IS the handoff.
+				this.finish("succeeded", undefined, {
+					handoff: renderHandoff(this.structuredHandoff),
+					truncated: false,
+					stopReason: final?.stopReason,
+					usage: { ...this.usage, turns: this.turns },
+				});
+				return;
+			}
 			this.finish("failed", {
 				code: "E_NO_HANDOFF",
 				message: "Child settled without a final assistant text message.",
 			});
 			return;
 		}
-		const { text: handoff, truncated } = truncateHandoff(final.text, this.cfg.maxResultBytes);
-		this.finish("succeeded", undefined, { handoff, truncated, stopReason: final.stopReason, usage: { ...final.usage, turns: this.turns } });
+		if (this.structuredHandoff) {
+			this.finish("succeeded", undefined, {
+				handoff: renderHandoff(this.structuredHandoff),
+				truncated: false,
+				stopReason: final.stopReason,
+				usage: { ...final.usage, turns: this.turns },
+			});
+		} else {
+			this.finalizeFreeTextFallback();
+		}
 		// End stdin and wait briefly for clean exit; if the RPC host remains
 		// alive, SIGTERM then SIGKILL. This never turns success into failure.
 		if (child) {
@@ -556,6 +844,28 @@ export class DelegateRunner {
 				}, this.cfg.killGraceMs);
 			}, 1500);
 		}
+	}
+
+	/**
+	 * Free-text fallback finalization: the child's own closing message
+	 * becomes the handoff (bounded), with a diagnostic note that the
+	 * structured protocol was not satisfied.
+	 */
+	private finalizeFreeTextFallback(): void {
+		if (this.finalizing) return;
+		const final = this.lastAssistant;
+		if (!final || !final.text.trim()) {
+			this.finish("failed", {
+				code: "E_NO_HANDOFF",
+				message: "Child settled without a final assistant text message.",
+			});
+			return;
+		}
+		if (this.handoffEnforceAttempts > 0) {
+			this.diagnosticNotes.push("child settled without the handoff tool; free-text handoff accepted after enforcement retries");
+		}
+		const { text: handoff, truncated } = truncateHandoff(final.text, this.cfg.maxResultBytes);
+		this.finish("succeeded", undefined, { handoff, truncated, stopReason: final.stopReason, usage: { ...final.usage, turns: this.turns } });
 	}
 
 	private finalizeOnExit(): void {
@@ -599,7 +909,7 @@ export class DelegateRunner {
 		}
 	}
 
-	private finish(state: RunTerminalState, error?: DelegateError, extra?: { handoff?: string; truncated?: boolean; stopReason?: string; usage?: DelegateUsage }): void {
+	private finish(state: RunTerminalState, error?: DelegateError, extra?: { handoff?: string; truncated?: boolean; stopReason?: string; usage?: DelegateUsage; partialHandoff?: string }): void {
 		if (this.finalizing) return;
 		this.finalizing = true;
 		const finishedAt = new Date().toISOString();
@@ -624,6 +934,20 @@ export class DelegateRunner {
 			metadataPatch.outputBytes = Buffer.byteLength(extra.handoff, "utf8");
 		}
 		if (extra?.stopReason) metadataPatch.stopReason = extra.stopReason;
+		// Structured handoff (from the child's handoff tool call).
+		if (this.structuredHandoff) metadataPatch.handoffData = this.structuredHandoff;
+		// R2: partial handoff from a killed child — first-class receipt field.
+		if (extra?.partialHandoff !== undefined) {
+			metadataPatch.partialHandoff = extra.partialHandoff;
+		}
+		// R3: locate + record the child's durable session file (new runs).
+		if (!this.req.sessionPath) {
+			const sessionPath = this.locateChildSession();
+			if (sessionPath) metadataPatch.sessionPath = sessionPath;
+		}
+		// R6: post-run worktree delta (bounded).
+		const gitDelta = gitDeltaSince(this.req.cwd);
+		if (gitDelta) metadataPatch.gitDelta = gitDelta;
 		if (effectiveError) {
 			metadataPatch.errorCode = effectiveError.code;
 			metadataPatch.errorMessage = effectiveError.message;
@@ -664,10 +988,15 @@ export class DelegateRunner {
 	private synthesizedTerminalError(state: RunTerminalState): DelegateError | undefined {
 		switch (state) {
 			case "timed_out_idle":
-				return {
-					code: "E_TIMEOUT_IDLE",
-					message: `no child activity for ${formatDuration(this.cfg.inactivityTimeoutMs)} (inactivity watchdog)`,
-				};
+				return this.openToolCalls.size > 0
+					? {
+						code: "E_TIMEOUT_IDLE",
+						message: `in-flight tool call exceeded the stuck-tool budget of ${formatDuration(this.cfg.stuckToolTimeoutMs ?? this.cfg.hardTimeoutMs)} (${this.openToolCalls.size} tool call(s) still open)`,
+					}
+					: {
+						code: "E_TIMEOUT_IDLE",
+						message: `no child activity for ${formatDuration(this.cfg.inactivityTimeoutMs)} (inactivity watchdog)`,
+					};
 			case "timed_out_hard":
 				return {
 					code: "E_TIMEOUT_HARD",
@@ -685,7 +1014,7 @@ export class DelegateRunner {
 
 	private outcome(
 		state: RunTerminalState,
-		extra?: { handoff?: string; truncated?: boolean; stopReason?: string; usage?: DelegateUsage },
+		extra?: { handoff?: string; truncated?: boolean; stopReason?: string; usage?: DelegateUsage; partialHandoff?: string },
 		error?: DelegateError,
 	): RunnerOutcome {
 		const finishedAt = new Date().toISOString();
@@ -694,6 +1023,7 @@ export class DelegateRunner {
 			runId: this.runId,
 			state,
 			handoff: state === "succeeded" ? extra?.handoff ?? "" : "",
+			partialHandoff: state !== "succeeded" ? extra?.partialHandoff : undefined,
 			outputBytes: Buffer.byteLength(extra?.handoff ?? "", "utf8"),
 			outputTruncated: extra?.truncated ?? false,
 			startedAt: this.startedAt,
@@ -735,6 +1065,7 @@ export class DelegateRunner {
 			runId: this.runId,
 			role: this.req.role.name,
 			phase,
+			model: this.req.parentModel,
 			elapsedMs: this.startedAtMs ? now - this.startedAtMs : 0,
 			lastActions: this.lastActions.slice(-5),
 			usage: { ...this.usage, turns: this.turns },
@@ -772,6 +1103,30 @@ export class DelegateRunner {
 		}, 250);
 	}
 
+	/**
+	 * R3: find the child's durable session file. New runs spawn with
+	 * `--session-dir <runsDir>/sessions`; pi names the file itself, so we
+	 * take the newest session file in that directory written during this
+	 * run's lifetime. Best-effort: absent when pi did not persist one.
+	 */
+	private locateChildSession(): string | undefined {
+		const dir = this.req.sessionDir;
+		if (!dir || !this.startedAtMs) return undefined;
+		try {
+			const names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl"));
+			let best: { name: string; mtime: number } | null = null;
+			for (const name of names) {
+				const st = fs.statSync(path.join(dir, name));
+				if (st.mtimeMs >= this.startedAtMs - 2_000 && (!best || st.mtimeMs > best.mtime)) {
+					best = { name, mtime: st.mtimeMs };
+				}
+			}
+			return best ? path.join(dir, best.name) : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
 	private cleanup(): void {
 		// NOTE: reap timers intentionally survive cleanup — they must run to
 		// completion to guarantee the child is killed (short-lived refs).
@@ -779,6 +1134,10 @@ export class DelegateRunner {
 		if (this.hardTimer) clearTimeout(this.hardTimer);
 		if (this.killGraceTimer) clearTimeout(this.killGraceTimer);
 		if (this.settleExitTimer) clearTimeout(this.settleExitTimer);
+		if (this.handoffGraceTimer) clearTimeout(this.handoffGraceTimer);
+		if (this.handoffSettleTimer) clearTimeout(this.handoffSettleTimer);
+		if (this.handoffEnforceTimer) clearTimeout(this.handoffEnforceTimer);
+		if (this.killEscalateTimer) clearTimeout(this.killEscalateTimer);
 		this.inactivityTimer = null;
 		this.hardTimer = null;
 		this.killGraceTimer = null;
@@ -804,6 +1163,61 @@ export class DelegateRunner {
 	}
 }
 
+
+// ── R6: git worktree checkpoints (bounded, best-effort, non-fatal) ─────────
+
+function gitExec(cwd: string, args: string[]): string | null {
+	try {
+		const out = childProcess.execFileSync("git", args, {
+			cwd,
+			encoding: "utf8",
+			timeout: 3000,
+			stdio: ["ignore", "pipe", "ignore"],
+			maxBuffer: 512 * 1024,
+		});
+		return out.trim();
+	} catch {
+		return null;
+	}
+}
+
+function isGitWorktree(cwd: string): boolean {
+	return gitExec(cwd, ["rev-parse", "--is-inside-work-tree"]) === "true";
+}
+
+/** Snapshot HEAD + bounded dirty status at run start. */
+export function gitCheckpoint(cwd: string): { gitBase: string; gitStatus?: string } | null {
+	if (!isGitWorktree(cwd)) return null;
+	const head = gitExec(cwd, ["rev-parse", "HEAD"]);
+	if (!head) return null;
+	const status = gitExec(cwd, ["status", "--porcelain"]);
+	const bounded = status ? status.split("\n").slice(0, 40).join("\n").slice(0, 2000) : "";
+	return { gitBase: head, ...(bounded ? { gitStatus: bounded } : {}) };
+}
+
+/**
+ * Bounded post-run worktree delta at finalization: `git diff --stat HEAD`
+ * plus untracked files (a killed child's brand-new files are exactly the
+ * evidence that matters — `diff HEAD` alone would hide them).
+ */
+export function gitDeltaSince(cwd: string, _since?: string): string | null {
+	if (!isGitWorktree(cwd)) return null;
+	const parts: string[] = [];
+	const diff = gitExec(cwd, ["diff", "--stat", "HEAD"]);
+	if (diff) parts.push(diff);
+	const untracked = gitExec(cwd, ["ls-files", "--others", "--exclude-standard"]);
+	if (untracked) {
+		parts.push(
+			untracked
+				.split("\n")
+				.slice(0, 40)
+				.map((f) => `untracked: ${f}`)
+				.join("\n"),
+		);
+	}
+	if (parts.length === 0) return null;
+	return parts.join("\n").slice(0, 4000);
+}
 
 /**
  * Display-safe one-liner for a child tool call (never fed to the model).

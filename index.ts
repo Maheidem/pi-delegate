@@ -22,6 +22,8 @@ import {
 import { Text } from "@earendil-works/pi-tui";
 
 import { formatDuration, loadConfig, parseDuration, saveConfig } from "./config.ts";
+import { delegateVersion } from "./version.ts";
+import { HandoffToolParams, validateHandoffSubmission, type HandoffSubmission } from "./handoff.ts";
 import { parseDelegateCommand, delegateCompletions, type DelegateIntent } from "./commands.ts";
 import { DELEGATE_ROLES, isRoleName, resolveRole } from "./roles.ts";
 import { STRICT_OVERLAY, syncStrictToolSet, resetBlockedCounters } from "./mode.ts";
@@ -113,9 +115,62 @@ export function formatRunSummary(
 	return out.join("\n");
 }
 
+/**
+ * Child-mode surface: the delegated child gets EXACTLY ONE delegate tool —
+ * the mandatory structured `handoff`. The child's final report is a
+ * protocol step (schema-validated, retried on error, enforced by the
+ * runner), never free text the harness hopes has the right shape.
+ */
+function registerChildHandoffTool(pi: ExtensionAPI): void {
+	pi.registerTool({
+		name: "handoff",
+		label: "Handoff",
+		description:
+			"MANDATORY final report for this delegated run. Your run does not complete until this tool " +
+			"has been called with a valid submission; free-text endings are rejected and you will be re-prompted. " +
+			"When terminated mid-work, call it immediately with outcome=partial.",
+		parameters: HandoffToolParams,
+		async execute(_toolCallId, params): Promise<{
+			content: Array<{ type: "text"; text: string }>;
+			details: { delegateHandoff?: HandoffSubmission; rejected?: boolean; errors?: string[] };
+			isError?: boolean;
+		}> {
+			const validation = validateHandoffSubmission(params);
+			if (!validation.ok) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text:
+								"handoff REJECTED — fix every field listed below and call the handoff tool again:\n" +
+								validation.errors.map((e) => `- ${e}`).join("\n"),
+						},
+					],
+					details: { rejected: true, errors: validation.errors },
+					isError: true,
+				};
+			}
+			const value = validation.value!;
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `handoff accepted (${value.outcome}) — you may now end your turn. Do not write another final message.`,
+					},
+				],
+				details: { delegateHandoff: value },
+			};
+		},
+	});
+}
+
 export default function delegateExtension(pi: ExtensionAPI) {
-	// 1. The child never reactivates this extension (POL: no recursion).
-	if (process.env.PI_DELEGATE_CHILD === "1") return;
+	// 1. The child never reactivates the parent surface (POL: no recursion) —
+	//    it registers ONLY the mandatory structured-handoff tool.
+	if (process.env.PI_DELEGATE_CHILD === "1") {
+		registerChildHandoffTool(pi);
+		return;
+	}
 	// 2. Construct state — no child, no timers at load time.
 	// PI_DELEGATE_AGENT_DIR is a test override; production uses getAgentDir().
 	const agentDir = process.env.PI_DELEGATE_AGENT_DIR || getAgentDir();
@@ -168,6 +223,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		source: "tool" | "command",
 		ctx: ExtensionContext,
 		timeoutMs?: number,
+		extras?: { model?: string; resumeFrom?: string },
 	): DelegateRequest => ({
 		task,
 		role,
@@ -178,6 +234,8 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		projectTrusted: ctx.isProjectTrusted(),
 		projectRoot: ctx.cwd ?? process.cwd(),
 		...(timeoutMs !== undefined ? { timeoutMs } : {}),
+		...(extras?.model ? { model: extras.model } : {}),
+		...(extras?.resumeFrom ? { resumeFrom: extras.resumeFrom } : {}),
 	});
 
 	const refreshDoctor = (ctx: ExtensionContext) => {
@@ -236,10 +294,21 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			: d.state.startsWith("timed_out") ? d.state.replace("_", " ")
 			: d.state;
 		const secs = Math.round(d.durationMs / 1000);
-		const head = `[delegate ${d.runId} · ${d.role} · ${stateLabel} in ${secs}s]`;
+		const head =
+			`[delegate v${delegateVersion()} · ${d.runId} · ${d.role} · ${stateLabel} in ${secs}s` +
+			`${d.model ? ` · ${d.model}` : ""}${d.timeoutInfo ? ` · ${d.timeoutInfo}` : ""}]`;
 		if (!res.ok) {
+			const parts = [head];
 			const err = res.error ? `${res.error.code}: ${res.error.message}` : "unknown failure";
-			return `${head}\nerror: ${err}\ntranscript: ${d.transcriptPath}`;
+			parts.push(`error: ${err}`);
+			// R2: the killed child's own account of its partial work.
+			if (res.details.partialHandoff) {
+				parts.push("", "partial handoff (captured at kill):", res.details.partialHandoff);
+			}
+			if (res.modelNote) parts.push(`note: ${res.modelNote}`);
+			parts.push(`transcript: ${d.transcriptPath}`);
+			if (d.sessionPath) parts.push(`session: ${d.sessionPath} (resumable via resumeFrom: ${d.runId})`);
+			return parts.join("\n");
 		}
 		const parts = [head, "", res.handoff];
 		if (d.outputTruncated || d.stderrPath) {
@@ -268,7 +337,20 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		timeout: Type.Optional(Type.String({
 			description:
 				"Optional per-run hard timeout, e.g. '90s', '10m', '2h', '1d' or bare ms. " +
-				"Use it when the subtask is expected to run longer than the configured default; it overrides the project/user config base.",
+				"Use it when the subtask is expected to run longer than the configured default; it overrides the project/user config base. " +
+				"Effective inactivity = min(config, hard/2); a single tool call longer than that is killed unless the in-flight-tool budget covers it — " +
+				"for long validation/benchmark work set timeout at 2x the longest expected tool call.",
+		})),
+		model: Type.Optional(Type.String({
+			description:
+				"Optional child model pin as 'provider/model-id'. Without it the child silently inherits the parent's CURRENT model — " +
+				"if the parent switches models mid-session (e.g. a usage-limit fallback), children follow. Pin this for model-sensitive work.",
+		})),
+		resumeFrom: Type.Optional(Type.String({
+			description:
+				"Resume a prior run's durable child session: pass its runId. The new child re-enters that exact context " +
+				"(earlier turns included) with your task as the continuation prompt — no cold re-explanation. " +
+				"Works for runs whose receipt records a sessionPath (post-0.2.0) and whose session file still exists.",
 		})),
 	});
 
@@ -284,6 +366,9 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			"Use delegate autonomously when a bounded subtask would consume substantial parent context, benefits from a specialist tool ceiling, or needs independent verification.",
 			"Pass the objective, relevant paths, constraints, and acceptance criteria in the delegate task text; the child cannot see parent history.",
 			"Do not use delegate for trivial one-step work, or when most of the parent history would have to be copied into the task.",
+			"A timed-out run leaves a partialHandoff, a git checkpoint and a resumable child session: pass resumeFrom: <runId> to continue in the same context instead of re-explaining, and inspect the receipt's gitDelta before repairing anything.",
+			"Pin model: 'provider/model-id' when the child must not silently follow the parent's current model (e.g. after a mid-session model fallback).",
+			"For long validation/benchmark subtasks set timeout to at least 2x the longest expected single tool call.",
 			"While delegation mode is active, all substantive work and verification must use delegate; the parent is coordination-only.",
 		],
 		parameters: DelegateParams,
@@ -301,13 +386,17 @@ export default function delegateExtension(pi: ExtensionAPI) {
 					};
 				}
 			}
-			const request = buildRequest(params.task, params.role ?? config.defaultRole, "tool", ctx, timeoutMs);
+			const request = buildRequest(params.task, params.role ?? config.defaultRole, "tool", ctx, timeoutMs, {
+				model: typeof params.model === "string" && params.model.trim() ? params.model.trim() : undefined,
+				resumeFrom: typeof params.resumeFrom === "string" && params.resumeFrom.trim() ? params.resumeFrom.trim() : undefined,
+			});
 			refreshDoctor(ctx);
 			const hooks = {
 				abortSignal: signal ?? undefined,
 				onUpdate: (u: RunStreamUpdate) => {
+					const modelBit = u.model ? ` · ${u.model}` : "";
 					onUpdate?.({
-						content: [{ type: "text", text: `[delegate ${u.runId} · ${u.role} · ${u.phase} · ${Math.round(u.elapsedMs / 1000)}s]` }],
+						content: [{ type: "text", text: `[delegate v${delegateVersion()} ${u.runId} · ${u.role}${modelBit} · ${u.phase} · ${Math.round(u.elapsedMs / 1000)}s]` }],
 						details: { runId: u.runId, phase: u.phase },
 					});
 				},
@@ -393,8 +482,8 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		}
 	};
 
-	const runCommandForeground = async (task: string, role: "general" | "research", ctx: ExtensionCommandContext, timeoutMs?: number): Promise<void> => {
-		const request = buildRequest(task, role, "command", ctx, timeoutMs);
+	const runCommandForeground = async (task: string, role: "general" | "research", ctx: ExtensionCommandContext, timeoutMs?: number, extras?: { resumeFrom?: string }): Promise<void> => {
+		const request = buildRequest(task, role, "command", ctx, timeoutMs, extras);
 		refreshDoctor(ctx);
 		let lastText = `[delegate] starting ${role} run…`;
 		const hooks = {
@@ -468,7 +557,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 
 	const statusText = (ctx: ExtensionContext): string => {
 		const s = app.getStatus(pi.getActiveTools(), ctx.cwd ?? process.cwd());
-		const lines = ["[delegate]", `mode: ${s.modeEnabled ? "strict" : "normal"}`];
+		const lines = ["[delegate]", `version: v${delegateVersion()} (loaded at session start; /reload picks up newer installs)`, `mode: ${s.modeEnabled ? "strict" : "normal"}`];
 		lines.push(`parent tools: ${s.modeEnabled ? "delegate only" : "normal active set"}`);
 		lines.push(`active run: ${s.activeRun ? `${s.activeRun.runId} (${s.activeRun.role})` : "none"}`);
 		if (s.lastRun) {
@@ -504,6 +593,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			"/delegate research <task>         research role",
 			"/delegate <task>                   general-role shorthand",
 			"/delegate cancel [run-id]        cancel the active run",
+			"/delegate resume <run-id> <task> resume a prior run's child session",
 			"/delegate inspect [run-id]       inspect a run (default: recent/active)",
 			"/delegate paths                    config + run store paths",
 			"/delegate doctor                 diagnostics",
@@ -590,6 +680,15 @@ export default function delegateExtension(pi: ExtensionAPI) {
 					}
 					await runCommandForeground(intent.task, intent.role, ctx, intent.timeoutMs);
 					return;
+				case "resume": {
+					const runId = intent.runId?.trim();
+					if (!runId || !intent.task) {
+						say(ctx, `[delegate] usage: /delegate resume <run-id> <continuation task...>`, "error");
+						return;
+					}
+					await runCommandForeground(intent.task, "general", ctx, intent.timeoutMs, { resumeFrom: runId });
+					return;
+				}
 				case "invalid":
 					say(ctx, `[delegate] unrecognized '${intent.token}'.\n${intent.usage}\n${helpText()}`, "error");
 					return;

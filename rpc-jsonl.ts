@@ -23,7 +23,7 @@ export interface RpcRecord {
 export type RpcRecordClassification =
 	| { kind: "prompt_response"; ok: boolean; id: string }
 	| { kind: "message_end"; stopReason?: string }
-	| { kind: "tool_event"; phase: "start" | "update" | "end"; toolName?: string; args?: Record<string, unknown> }
+	| { kind: "tool_event"; phase: "start" | "update" | "end"; id?: string; toolName?: string; args?: Record<string, unknown>; result?: { details?: unknown; isError?: boolean } }
 	| { kind: "agent_settled" }
 	| { kind: "agent_end" }
 	| { kind: "extension_ui_request"; id: string }
@@ -148,6 +148,7 @@ export function classifyRpcRecord(record: RpcRecord): RpcRecordClassification {
 			return {
 				kind: "tool_event",
 				phase: "start",
+				id: typeof obj.toolCallId === "string" ? obj.toolCallId : undefined,
 				toolName: typeof obj.toolName === "string" ? obj.toolName : undefined,
 				args: isArgsObject(obj.args) ? (obj.args as Record<string, unknown>) : undefined,
 			};
@@ -155,14 +156,21 @@ export function classifyRpcRecord(record: RpcRecord): RpcRecordClassification {
 			return {
 				kind: "tool_event",
 				phase: "update",
+				id: typeof obj.toolCallId === "string" ? obj.toolCallId : undefined,
 				toolName: typeof obj.toolName === "string" ? obj.toolName : undefined,
 			};
-		case "tool_execution_end":
+		case "tool_execution_end": {
+			const result = (obj.result ?? {}) as Record<string, unknown>;
 			return {
 				kind: "tool_event",
 				phase: "end",
+				id: typeof obj.toolCallId === "string" ? obj.toolCallId : undefined,
 				toolName: typeof obj.toolName === "string" ? obj.toolName : undefined,
+				...(result && typeof result === "object"
+					? { result: { details: result.details, isError: result.isError === true } }
+					: {}),
 			};
+		}
 		case "agent_settled":
 			return { kind: "agent_settled" };
 		case "agent_end":

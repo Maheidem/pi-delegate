@@ -342,16 +342,19 @@ async function main() {
 
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
-				await pi.prompt("/delegate run general Reply with exactly: DELEGATE-E2E-OK", 420_000);
+				await pi.prompt(
+					"/delegate run general Submit your result via the handoff tool with outcome done and summary exactly: DELEGATE-E2E-OK. No file changes.",
+					420_000,
+				);
 				break;
 			} catch {
 				if (attempt === 1) throw new Error("A run stalled twice");
 			}
 		}
-		const t = pi.allText();
-		ok(t.includes("DELEGATE-E2E-OK"), "A: child handoff surfaced");
 		const receipt = latestReceipt();
 		ok(receipt && receipt.state === "succeeded", `A: receipt succeeded (${receipt?.state})`);
+		ok(receipt?.handoffData?.summary?.includes("DELEGATE-E2E-OK"),
+			`A: structured handoff captured via the handoff tool (${JSON.stringify(receipt?.handoffData?.summary)?.slice(0, 60)})`);
 		ok(
 			receipt && fs.existsSync(receipt.transcriptPath) && fs.statSync(receipt.transcriptPath).size > 0,
 			"A: transcript persisted",
@@ -377,16 +380,23 @@ async function main() {
 		const toolStarts = pi.events("tool_execution_start").filter((e) => e.toolName === "read");
 		const texts = pi.allText();
 		ok(toolStarts.length === 0 || /block|strict|not allowed|denied/i.test(texts), "B: read blocked in strict mode");
-		// delegation itself still works while strict
+		// delegation itself still works while strict. Local flash models
+		// sometimes paraphrase the echo token ("replied with the exact
+		// requested string") — the terminal receipt is the reliable signal.
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
-				await pi.prompt("/delegate run general Reply with exactly: STRICT-OK", 420_000);
+				await pi.prompt(
+					"/delegate run general Submit your result via the handoff tool with outcome done and summary exactly: STRICT-OK. No file changes.",
+					420_000,
+				);
 				break;
 			} catch {
 				if (attempt === 1) throw new Error("B run stalled twice");
 			}
 		}
-		ok(pi.allText().includes("STRICT-OK"), "B: delegation works while strict");
+		const strictRun = latestReceipt();
+		ok(strictRun?.state === "succeeded", `B: delegation works while strict (${strictRun?.state})`);
+		ok(!!strictRun?.handoffData, "B: structured handoff enforced while strict");
 		await pi.prompt("/delegate off");
 		ok(/disabled|off/i.test(pi.allText()), "B: disable acknowledged");
 		await stop(pi);
@@ -430,23 +440,106 @@ async function main() {
 		if (runScenario("F")) {
 		const cfgPath = path.join(E2E_CFG, "delegate", "config.json");
 		fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
-		// 15 s inactivity: a child that runs `sleep 60` must trip the
-		// inactivity watchdog — on a REAL child, not a fake one.
-		fs.writeFileSync(cfgPath, JSON.stringify({ inactivityTimeoutMs: 15_000 }));
+		// 15 s budgets: a child that runs `sleep 60` inside a tool call must
+		// trip the stuck-tool watchdog (R1 moved long in-flight tools off the
+		// plain inactivity budget) — on a REAL child, not a fake one.
+		fs.writeFileSync(cfgPath, JSON.stringify({ inactivityTimeoutMs: 15_000, stuckToolTimeoutMs: 15_000 }));
 		const dir = makeWorkspace();
 		const pi = startPi(dir);
 		await pi.prompt(
-			"/delegate run general Run this exact bash command and wait for it to finish: sleep 60. Then reply SLEPT.",
-			240_000,
+			"/delegate run general Run this exact bash command and wait for it to finish: sleep 60. Then submit via the handoff tool with outcome done and summary exactly: SLEPT.",
+			480_000,
 		);
 		await stop(pi);
 		const done = latestReceipt();
 		ok(done?.state === "timed_out_idle", `F: real idle timeout (${done?.state})`);
 		ok(done?.errorCode === "E_TIMEOUT_IDLE", `F: errorCode E_TIMEOUT_IDLE (${done?.errorCode})`);
 		const t = pi.allText();
-		ok(t.includes("E_TIMEOUT_IDLE") && /no child activity/.test(t), "F: tool text carries the specific error");
+		ok(t.includes("E_TIMEOUT_IDLE") && /(stuck-tool budget|no child activity)/.test(t), "F: tool text carries the specific error");
 		ok(!/unknown failure/.test(t), "F: never 'unknown failure'");
 		fs.unlinkSync(cfgPath); // restore defaults for the later scenarios
+		}
+	}
+
+	// ── Scenario G: R1 — long in-flight tool survives the idle watchdog ─
+	// The exact class-A bug from the 2026-09-03 investigation: a child
+	// running one long silent tool call (matrix/benchmark/soak) was
+	// guaranteed-killed at the inactivity budget. With R1 the in-flight
+	// budget (default = hard) governs, so the child completes.
+	{
+		if (runScenario("G")) {
+		const cfgPath = path.join(E2E_CFG, "delegate", "config.json");
+		fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+		fs.writeFileSync(cfgPath, JSON.stringify({ inactivityTimeoutMs: 15_000 }));
+		const dir = makeWorkspace();
+		const pi = startPi(dir);
+		await pi.prompt(
+			"/delegate run general Run this exact bash command and wait for it to finish (about 40 seconds): sleep 40. After it finishes submit via the handoff tool with outcome done and summary exactly: MATRIX-DONE.",
+			480_000,
+		);
+		await stop(pi);
+		const done = latestReceipt();
+		ok(done?.state === "succeeded", `G: long in-flight tool survived the idle watchdog (${done?.state})`);
+		ok(String(latestReceipt()?.handoffData?.summary ?? "").includes("MATRIX-DONE"), "G: child completed its work (structured)");
+		fs.unlinkSync(cfgPath);
+		}
+	}
+
+	// ── Scenario H: R2 — hard timeout captures a partial handoff ──────
+	{
+		if (runScenario("H")) {
+		const dir = makeWorkspace();
+		const pi = startPi(dir);
+		await pi.prompt(
+			"/delegate run general Run this exact bash command and wait for it to finish: sleep 600. After it finishes reply with exactly: NEVER --timeout 30s",
+			300_000,
+		);
+		await stop(pi);
+		const done = latestReceipt();
+		ok(done?.state === "timed_out_hard", `H: hard timeout fired (${done?.state})`);
+		ok(done?.errorCode === "E_TIMEOUT_HARD", `H: E_TIMEOUT_HARD (${done?.errorCode})`);
+		ok(typeof done?.partialHandoff === "string" && done.partialHandoff.length > 20,
+			`H: partialHandoff captured on the receipt (${done?.partialHandoff?.length ?? 0} bytes)`);
+		const t = pi.allText();
+		ok(t.includes("partial handoff"), "H: tool text surfaces the partial handoff");
+		}
+	}
+
+	// ── Scenario I: R3 — durable child session + resume ───────────────
+	{
+		if (runScenario("I")) {
+		const dir = makeWorkspace();
+		const pi = startPi(dir);
+		await pi.prompt(
+			"/delegate run general Do NOT create, write, or modify any files, and do not run any commands. The secret word for this session is ZEBRA-7391; you will be asked for it later. Submit via the handoff tool with outcome done and summary exactly: ACK ZEBRA-7391.",
+			420_000,
+		);
+		const first = latestReceipt();
+		ok(first?.state === "succeeded", `I: first run succeeded (${first?.state})`);
+		ok(typeof first?.sessionPath === "string" && fs.existsSync(first.sessionPath),
+			"I: child session file persisted + recorded on the receipt");
+		await pi.prompt(
+			`/delegate resume ${first.runId} Earlier in this session you were told a secret word. Submit via the handoff tool with outcome done and summary exactly that word.`,
+			420_000,
+		);
+		await stop(pi);
+		const second = latestReceipt();
+		ok(second?.state === "succeeded", `I: resume run succeeded (${second?.state})`);
+		ok(second?.resumeOf === first.runId, "I: resume receipt records resumeOf");
+		ok(String(second?.handoffData?.summary ?? "").includes("ZEBRA-7391"), "I: resumed child remembers its earlier context (secret word never touched disk)");
+		}
+	}
+
+	// ── Scenario J: R7 — version provenance in status ─────────────────
+	{
+		if (runScenario("J")) {
+		const dir = makeWorkspace();
+		const pi = startPi(dir);
+		await pi.prompt("/delegate status");
+		const s = pi.allText();
+		ok(/version: v\d+\.\d+\.\d+/.test(s), "J: status shows the executing extension version");
+		ok(s.includes("/reload"), "J: status documents the /reload requirement for newer installs");
+		await stop(pi);
 		}
 	}
 
@@ -458,7 +551,7 @@ async function main() {
 		const dirA = makeWorkspace();
 		const piA = startPi(dirA);
 		const runP = piA.prompt(
-			"/delegate run general Run this exact bash command and wait for it to finish: sleep 60. Then reply SLEPT-DONE.",
+			"/delegate run general Run this exact bash command and wait for it to finish: sleep 60. Then submit via the handoff tool with outcome done and summary exactly: SLEPT-DONE.",
 			420_000,
 		);
 		const active = await awaitReceipt((m) => m.state === "running" && typeof m.pid === "number", 180_000);
@@ -490,7 +583,7 @@ async function main() {
 			const finalState = await watch;
 			ok(finalState !== "clobbered", `D: run never clobbered by concurrent pi startup (final ${finalState})`);
 			await runP.catch(() => {});
-			ok(piA.allText().includes("SLEPT-DONE"), "D: child handoff surfaced");
+			ok(String(latestReceipt()?.handoffData?.summary ?? "").includes("SLEPT-DONE"), "D: child handoff surfaced (structured)");
 			const done = readReceipt(active.runId);
 			ok(done?.state === "succeeded", `D: run completed successfully (${done?.state})`);
 			ok(!(done?.errorCode ?? "").includes("ORPHANED"), "D: no orphaned-run error on receipt");

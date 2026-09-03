@@ -21,6 +21,8 @@ export interface DelegateRole {
 	writeCapable: boolean;
 }
 
+import type { HandoffSubmission } from "./handoff.ts";
+
 // ── Errors ────────────────────────────────────────────────────────────────
 
 export const DELEGATE_ERROR_CODES = [
@@ -37,6 +39,7 @@ export const DELEGATE_ERROR_CODES = [
 	"E_RPC_PROMPT_REJECTED",
 	"E_CHILD_EXIT",
 	"E_CHILD_MODEL",
+	"E_PROVIDER_ERROR",
 	"E_NO_HANDOFF",
 	"E_CANCELLED",
 	"E_TIMEOUT_IDLE",
@@ -105,6 +108,8 @@ export interface DelegateRequest {
 	cwd: string;
 	/** "provider/model-id" of the parent model. */
 	parentModel: string;
+	/** R5: explicit child model pin ("provider/model-id"); overrides inheritance. */
+	model?: string;
 	/** Parent thinking level, when available. */
 	thinkingLevel?: string;
 	projectTrusted: boolean;
@@ -112,6 +117,8 @@ export interface DelegateRequest {
 	timeoutMs?: number;
 	/** Project root for the project-wide config overlay (optional). */
 	projectRoot?: string;
+	/** R3: resume a prior run's child session (its session file is re-entered). */
+	resumeFrom?: string;
 }
 
 /** Bounded, parent-visible tool result details (schema v1). */
@@ -130,6 +137,12 @@ export interface DelegateDetails {
 	usage: DelegateUsage;
 	outputBytes: number;
 	outputTruncated: boolean;
+	/** R2: partial handoff captured from a killed child (timeouts). */
+	partialHandoff?: string;
+	/** R3: the child's persisted session file, when session capture is on. */
+sessionPath?: string;
+	/** R7: resolved timeout provenance, e.g. "hard 45m (per-run) · idle 22m30s". */
+	timeoutInfo?: string;
 	transcriptPath: string;
 	stderrPath: string;
 	displayItems: DelegateDisplayItem[];
@@ -144,6 +157,8 @@ export interface DelegateRunResult {
 	/** Bounded final handoff for the parent context ("" on failure). */
 	handoff: string;
 	details: DelegateDetails;
+	/** R5/R7: provenance notes (model pin, partial-handoff availability). */
+	modelNote?: string;
 	error?: DelegateError;
 }
 
@@ -152,6 +167,8 @@ export interface RunnerOutcome {
 	runId: string;
 	state: RunTerminalState;
 	handoff: string;
+	/** R2: bounded partial handoff captured at timeout kill. */
+	partialHandoff?: string;
 	outputBytes: number;
 	outputTruncated: boolean;
 	startedAt: string;
@@ -193,6 +210,20 @@ export interface RunMetadataV1 {
 	outputBytes?: number;
 	outputTruncated?: boolean;
 	finalHandoff?: string;
+	/** R2: partial handoff captured from a killed child (timeouts). */
+	partialHandoff?: string;
+	/** Structured handoff submitted through the child's handoff tool. */
+	handoffData?: HandoffSubmission;
+	/** R3: the child's persisted session file (durable resume anchor). */
+	sessionPath?: string;
+	/** R3: prior run whose child session this run resumed. */
+	resumeOf?: string;
+	/** R6: git HEAD at run start ("<sha>" when the cwd is a git worktree). */
+	gitBase?: string;
+	/** R6: bounded `git status --porcelain` at run start. */
+	gitStatus?: string;
+	/** R6: bounded post-run `git diff --stat` (worktree vs. run start). */
+	gitDelta?: string;
 	transcriptPath: string;
 	stderrPath: string;
 	/** Present only on manually curated receipts (one-time data repair). */
@@ -342,6 +373,8 @@ export interface RunStreamUpdate {
 	runId: string;
 	role: RoleName;
 	phase: "starting" | "running" | `tool:${string}` | "finalizing";
+	/** R5: the resolved child model, echoed in live updates. */
+	model?: string;
 	elapsedMs: number;
 	lastActions: string[];
 	usage: DelegateUsage;

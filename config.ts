@@ -16,6 +16,12 @@ export interface DelegateConfigV1 {
 	inactivityTimeoutMs: number;
 	hardTimeoutMs: number;
 	killGraceMs: number;
+	/** R2: how long to wait for a killed child's final handoff answer. */
+	handoffGraceMs: number;
+	/** Bounded wait for the mandatory-handoff enforcement answer (default 60 s). */
+	handoffEnforceTimeoutMs: number;
+	/** R1: watchdog budget while a tool call is in flight (default: hard). */
+	stuckToolTimeoutMs?: number;
 	maxRuns: number;
 	maxRunAgeDays: number;
 	updateThrottleMs: number;
@@ -29,6 +35,9 @@ export const DEFAULT_DELEGATE_CONFIG: DelegateConfigV1 = {
 	inactivityTimeoutMs: 300_000,
 	hardTimeoutMs: 1_800_000,
 	killGraceMs: 5_000,
+	handoffGraceMs: 90_000,
+	handoffEnforceTimeoutMs: 60_000,
+	stuckToolTimeoutMs: undefined,
 	maxRuns: 50,
 	maxRunAgeDays: 30,
 	updateThrottleMs: 100,
@@ -40,6 +49,9 @@ const MIN_VALUES: Partial<Record<keyof DelegateConfigV1, number>> = {
 	inactivityTimeoutMs: 1_000,
 	hardTimeoutMs: 1_000,
 	killGraceMs: 100,
+	handoffGraceMs: 1_000,
+	handoffEnforceTimeoutMs: 1_000,
+	stuckToolTimeoutMs: 1_000,
 	maxRuns: 1,
 	maxRunAgeDays: 1,
 	updateThrottleMs: 0,
@@ -51,6 +63,9 @@ const MAX_VALUES: Partial<Record<keyof DelegateConfigV1, number>> = {
 	inactivityTimeoutMs: 86_400_000,
 	hardTimeoutMs: 604_800_000,
 	killGraceMs: 60_000,
+	handoffGraceMs: 600_000,
+	handoffEnforceTimeoutMs: 600_000,
+	stuckToolTimeoutMs: 604_800_000,
 	maxRuns: 10_000,
 	maxRunAgeDays: 3650,
 	updateThrottleMs: 5_000,
@@ -202,13 +217,21 @@ export function clampConfigField(key: string, value: number): number | null {
 export function resolveRunTimeouts(
 	baseCfg: DelegateConfigV1,
 	timeoutMs?: number,
-): { hardMs: number; inactivityMs: number } {
-	const hardMs = timeoutMs !== undefined ? clampTimeoutMs(timeoutMs) : baseCfg.hardTimeoutMs;
+): { hardMs: number; inactivityMs: number; stuckToolMs: number; hardSource: "per-run" | "config" } {
+	const perRun = timeoutMs !== undefined;
+	const hardMs = perRun ? clampTimeoutMs(timeoutMs!) : baseCfg.hardTimeoutMs;
 	const inactivityMs = Math.min(
 		baseCfg.inactivityTimeoutMs,
 		Math.max(1_000, Math.floor(hardMs / 2)),
 	);
-	return { hardMs, inactivityMs };
+	// R1: while a tool call is in flight the watchdog uses the stuck-tool
+	// budget (default: the full hard timeout), so legitimate long-running
+	// tool calls (test matrices, benchmarks, soaks) are never idle-killed.
+	const stuckToolMs = Math.min(
+		baseCfg.stuckToolTimeoutMs ?? hardMs,
+		hardMs,
+	);
+	return { hardMs, inactivityMs, stuckToolMs, hardSource: perRun ? "per-run" : "config" };
 }
 
 /** Human-readable duration for TUI display and prefilled inputs. */

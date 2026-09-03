@@ -24,6 +24,7 @@ const FAST: RunnerConfig = {
 	hardTimeoutMs: 20_000,
 	killGraceMs: 700,
 	updateThrottleMs: 50,
+	handoffEnforceTimeoutMs: 2500,
 };
 
 function makeReq(task = "do the thing"): DelegateRequest {
@@ -59,13 +60,24 @@ function spawnRunner(agentDir: string, script: string, cfg: RunnerConfig = FAST,
 
 const FAKE_OK = `
 let buf = "";
+let first = true;
 process.stdin.on("data", (c) => {
   buf += c;
-  if (buf.includes("\\n")) {
-    const rec = JSON.parse(buf.split("\\n")[0]);
-    process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
-    process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "FINAL HANDOFF" }], usage: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 30, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.001 } }, stopReason: "stop" } }) + "\\n");
-    process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+  const lines = buf.split("\\n"); buf = lines.pop() ?? "";
+  for (const l of lines) {
+    const rec = JSON.parse(l);
+    if (rec.type === "prompt" && (String(rec.id).endsWith(":handoff-required") || String(rec.id).endsWith(":handoff"))) {
+      process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "tool_execution_end", toolCallId: "h1", toolName: "handoff", result: { content: [], details: { delegateHandoff: { outcome: "done", summary: "FINAL HANDOFF", changes: [], verification: [], remaining: [], risks: [] } } } }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+      process.exit(0);
+    }
+    if (rec.type === "prompt" && first) {
+      first = false;
+      process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "FINAL HANDOFF" }], usage: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 30, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.001 } }, stopReason: "stop" } }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+    }
   }
 });
 `;
@@ -75,13 +87,15 @@ test("runner: success captures transcript, bounded handoff, metadata", async () 
 	const { runner, opened } = spawnRunner(dir, FAKE_OK);
 	const outcome = await runner.run();
 	assert.equal(outcome.state, "succeeded");
-	assert.equal(outcome.handoff, "FINAL HANDOFF");
+	assert.match(outcome.handoff, /## Outcome \(done\)/);
+	assert.match(outcome.handoff, /FINAL HANDOFF/);
 	assert.equal(outcome.usage.output, 20);
 	const lines = fs.readFileSync(opened.paths.transcriptPath, "utf8").trim().split("\n");
 	assert.ok(lines.length >= 3);
 	const meta = JSON.parse(fs.readFileSync(opened.paths.metadataPath, "utf8"));
 	assert.equal(meta.state, "succeeded");
 	assert.equal(meta.errorCode, undefined);
+	assert.equal(meta.handoffData?.summary, "FINAL HANDOFF");
 	assert.ok(meta.transcriptPath.includes(runner.runId));
 });
 
@@ -95,6 +109,12 @@ process.stdin.on("data", (c) => {
     if (rec.type === "prompt") {
       process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
       process.stdout.write(JSON.stringify({ type: "extension_ui_request", id: "u1", method: "confirm" }) + "\\n");
+    }
+    if (rec.type === "prompt" && (String(rec.id).endsWith(":handoff-required") || String(rec.id).endsWith(":handoff"))) {
+      process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "tool_execution_end", toolCallId: "h1", toolName: "handoff", result: { content: [], details: { delegateHandoff: { outcome: "done", summary: "UI OK", changes: [], verification: [], remaining: [], risks: [] } } } }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+      process.exit(0);
     }
     if (rec.type === "extension_ui_response") {
       process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "OK" }], usage: {}, stopReason: "stop" } }) + "\\n");
@@ -347,4 +367,376 @@ test("runner: describeToolAction truncates long args", () => {
 	const out = describeToolAction("bash", { command: "x".repeat(200) });
 	assert.ok(out.endsWith("…"));
 	assert.ok(Array.from(out).length <= 100);
+});
+
+// ── R1: in-flight tool calls count as activity ───────────────────────────
+
+test("R1: silent in-flight tool call survives the idle watchdog, completes", async () => {
+	const dir = tmpDir("r1-open-tool");
+	const script = `
+let buf = "";
+process.stdin.on("data", (c) => {
+  buf += c;
+  const lines = buf.split("\\n"); buf = lines.pop() ?? "";
+  for (const l of lines) {
+    const rec = JSON.parse(l);
+    if (rec.type === "prompt" && !(String(rec.id).endsWith(":handoff-required") || String(rec.id).endsWith(":handoff"))) {
+      process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "sleep 1.6" } }) + "\\n");
+      setTimeout(() => {
+        process.stdout.write(JSON.stringify({ type: "tool_execution_end", toolCallId: "t1", toolName: "bash", result: { content: [{ type: "text", text: "done" }] } }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "SURVIVED" }], usage: {}, stopReason: "stop" } }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+        process.exit(0);
+      }, 1600);
+    }
+  }
+});
+`;
+	// The child exits after its free-text settle, so the enforcement prompt
+	// EPIPEs and the free-text fallback finalizes immediately.
+	const { runner } = spawnRunner(dir, script, { ...FAST, inactivityTimeoutMs: 500, stuckToolTimeoutMs: 4000 });
+	const outcome = await runner.run();
+	assert.equal(outcome.state, "succeeded");
+	assert.match(outcome.handoff, /SURVIVED/);
+});
+
+test("R1: stuck-tool budget still reaps a hung tool call", async () => {
+	const dir = tmpDir("r1-stuck");
+	const script = `
+let buf = "";
+process.stdin.on("data", (c) => {
+  buf += c;
+  const lines = buf.split("\\n"); buf = lines.pop() ?? "";
+  for (const l of lines) {
+    const rec = JSON.parse(l);
+    if (rec.type === "prompt") {
+      process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "hang" } }) + "\\n");
+      setInterval(() => {}, 10000);
+    }
+  }
+});
+`;
+	const { runner } = spawnRunner(dir, script, { ...FAST, inactivityTimeoutMs: 400, stuckToolTimeoutMs: 900, hardTimeoutMs: 60_000 });
+	const outcome = await runner.run();
+	assert.equal(outcome.state, "timed_out_idle");
+	assert.equal(outcome.error?.code, "E_TIMEOUT_IDLE");
+	assert.match(outcome.error?.message ?? "", /stuck-tool budget/);
+});
+
+// ── R2: graceful timeout handoff (structured, via the handoff tool) ──────
+
+test("R2: hard timeout mid-work captures a structured partial handoff", async () => {
+	const dir = tmpDir("r2-handoff");
+	const script = `
+let buf = "";
+let handoffDone = false;
+process.stdin.on("data", (c) => {
+  buf += c;
+  const lines = buf.split("\\n"); buf = lines.pop() ?? "";
+  for (const l of lines) {
+    const rec = JSON.parse(l);
+    if (rec.type === "prompt" && !String(rec.id).endsWith(":handoff") && !String(rec.id).endsWith(":handoff-required")) {
+      process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "long-matrix" } }) + "\\n");
+    }
+    if (rec.type === "abort") {
+      process.stdout.write(JSON.stringify({ type: "response", command: "abort", success: true }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "tool_execution_end", toolCallId: "t1", toolName: "bash", result: { content: [{ type: "text", text: "Command aborted" }] } }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+    }
+    if (rec.type === "prompt" && String(rec.id).endsWith(":handoff") && !handoffDone) {
+      handoffDone = true;
+      process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "tool_execution_end", toolCallId: "h1", toolName: "handoff", result: { content: [], details: { delegateHandoff: { outcome: "partial", summary: "matrix run interrupted at 60%", changes: [{ path: "a.ts", action: "modified", note: "half migrated" }, { path: "b.ts", action: "created" }], verification: [{ command: "npm test", result: "fail", note: "2 failing" }], remaining: ["finish c.ts migration"], risks: [] } } } }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+      process.exit(0);
+    }
+  }
+});
+`;
+	const { runner } = spawnRunner(dir, script, { ...FAST, hardTimeoutMs: 700, handoffGraceMs: 4000, inactivityTimeoutMs: 60_000 });
+	const outcome = await runner.run();
+	assert.equal(outcome.state, "timed_out_hard");
+	assert.equal(outcome.error?.code, "E_TIMEOUT_HARD");
+	assert.match(outcome.partialHandoff ?? "", /## Outcome \(partial · captured at kill\)/);
+	assert.match(outcome.partialHandoff ?? "", /a\.ts/);
+	assert.match(outcome.partialHandoff ?? "", /✗ npm test/);
+	assert.match(outcome.partialHandoff ?? "", /finish c\.ts migration/);
+	const meta = JSON.parse(fs.readFileSync(runPaths(dir, runner.runId).metadataPath, "utf8"));
+	assert.equal(meta.handoffData?.outcome, "partial");
+	assert.equal(meta.errorCode, "E_TIMEOUT_HARD");
+});
+
+test("R2: child that never settles after abort still finalizes (no deadlock)", async () => {
+	const dir = tmpDir("r2-nosettle");
+	const script = `
+process.on("SIGTERM", () => process.exit(143));
+let buf = "";
+process.stdin.on("data", (c) => {
+  buf += c;
+  const lines = buf.split("\\n"); buf = lines.pop() ?? "";
+  for (const l of lines) {
+    const rec = JSON.parse(l);
+    if (rec.type === "prompt" && !String(rec.id).endsWith(":handoff") && !String(rec.id).endsWith(":handoff-required")) {
+      process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
+    }
+    if (rec.type === "abort") {
+      // swallow: tool hangs forever, child never settles
+    }
+  }
+});
+`;
+	const { runner } = spawnRunner(dir, script, { ...FAST, hardTimeoutMs: 500, killGraceMs: 300, handoffGraceMs: 2000 });
+	const outcome = await runner.run();
+	assert.equal(outcome.state, "timed_out_hard");
+	assert.equal(outcome.exitCode, 143);
+});
+
+// ── R3: durable child session ────────────────────────────────────────────
+
+test("R3: child args persist sessions (--session-dir) or re-enter (--session)", async () => {
+	const { buildChildArgs } = await import("../runner.ts");
+	const role = resolveRole("general", "general");
+	const base = {
+		agentDir: "/a", role, task: "t", runId: "del_20260903T000000Z_00000000",
+		parentModel: "p/m", cwd: "/w", projectTrusted: true, registeredTools: [],
+	};
+	const fresh = buildChildArgs(base, role);
+	assert.ok(fresh.args.includes("--session-dir"));
+	const toolsArg = fresh.args[fresh.args.indexOf("--tools") + 1] ?? "";
+	assert.ok(toolsArg.split(",").includes("handoff"), `handoff tool is in the child ceiling (${toolsArg})`);
+	assert.ok(!fresh.args.includes("--no-session"));
+	const resumed = buildChildArgs({ ...base, sessionPath: "/runs/x.session.jsonl" }, role);
+	assert.equal(resumed.args[resumed.args.indexOf("--session") + 1], "/runs/x.session.jsonl");
+});
+
+test("R3: run records the child's durable session file in the receipt", async () => {
+	const dir = tmpDir("r3-session");
+	const sessionDir = path.join(dir, "sessions");
+	fs.mkdirSync(sessionDir, { recursive: true });
+	const opened = openRun(dir, makeReq());
+	const sessionFile = path.join(sessionDir, "child.session.jsonl");
+	const runner = new DelegateRunner(
+		opened,
+		{
+			agentDir: dir,
+			role: resolveRole("general", "general"),
+			task: "t",
+			runId: opened.metadata.runId,
+			parentModel: "lm/studio",
+			cwd: process.cwd(),
+			projectTrusted: true,
+			registeredTools: [],
+			sessionDir,
+		},
+		FAST,
+		{},
+		fakeInvocation(`
+let buf = "";
+const fs = require("fs");
+process.stdin.on("data", (c) => {
+  buf += c;
+  const lines = buf.split("\\n"); buf = lines.pop() ?? "";
+  for (const l of lines) {
+    const rec = JSON.parse(l);
+    if (String(rec.id).endsWith(":handoff-required") || String(rec.id).endsWith(":handoff")) {
+      process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "tool_execution_end", toolCallId: "h1", toolName: "handoff", result: { content: [], details: { delegateHandoff: { outcome: "done", summary: "OK", changes: [], verification: [], remaining: [], risks: [] } } } }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+      process.exit(0);
+    }
+    if (rec.type === "prompt") {
+      process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
+      fs.writeFileSync(${"SESSIONFILE_PLACEHOLDER"}, "{}\\n");
+      setTimeout(() => {
+        process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "OK" }], usage: {}, stopReason: "stop" } }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+      }, 150);
+    }
+  }
+});
+`.replace("SESSIONFILE_PLACEHOLDER", JSON.stringify(sessionFile))),
+	);
+	const outcome = await runner.run();
+	assert.equal(outcome.state, "succeeded");
+	const meta = JSON.parse(fs.readFileSync(opened.paths.metadataPath, "utf8"));
+	assert.equal(meta.sessionPath, sessionFile);
+});
+
+// ── R4: precise provider-error diagnosis ─────────────────────────────────
+
+test("R4: provider errorMessage is quoted verbatim as E_PROVIDER_ERROR", async () => {
+	const dir = tmpDir("r4-provider");
+	const script = `
+let buf = "";
+process.stdin.on("data", (c) => {
+  buf += c;
+  const lines = buf.split("\\n"); buf = lines.pop() ?? "";
+  for (const l of lines) {
+    const rec = JSON.parse(l);
+    if (rec.type === "prompt") {
+      process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], usage: {}, stopReason: "error", errorMessage: "Codex error: The usage limit has been reached" } }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+      process.exit(0);
+    }
+  }
+});
+`;
+	const { runner } = spawnRunner(dir, script);
+	const outcome = await runner.run();
+	assert.equal(outcome.state, "failed");
+	assert.equal(outcome.error?.code, "E_PROVIDER_ERROR");
+	assert.match(outcome.error?.message ?? "", /usage limit has been reached/);
+	assert.ok(!/stderr tail/.test(outcome.error?.message ?? ""), "stderr tail must not be the cause");
+});
+
+test("R4: abort-artifact error message classified as killed-by-watchdog", async () => {
+	const dir = tmpDir("r4-abort-artifact");
+	const script = `
+let buf = "";
+process.stdin.on("data", (c) => {
+  buf += c;
+  const lines = buf.split("\\n"); buf = lines.pop() ?? "";
+  for (const l of lines) {
+    const rec = JSON.parse(l);
+    if (rec.type === "prompt") {
+      process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], usage: {}, stopReason: "error", errorMessage: "This operation was aborted" } }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+      process.exit(0);
+    }
+  }
+});
+`;
+	const { runner } = spawnRunner(dir, script);
+	const outcome = await runner.run();
+	assert.equal(outcome.state, "failed");
+	assert.equal(outcome.error?.code, "E_CHILD_MODEL");
+	assert.match(outcome.error?.message ?? "", /aborted mid-request/);
+});
+
+// ── R6: git worktree checkpoint ──────────────────────────────────────────
+
+test("R6: receipt carries gitBase/gitStatus/gitDelta for a git cwd", async () => {
+	const { execFileSync } = await import("node:child_process");
+	const dir = tmpDir("r6-git");
+	fs.writeFileSync(path.join(dir, "tracked.txt"), "one\n");
+	execFileSync("git", ["init", "-q"], { cwd: dir, stdio: "ignore" });
+	execFileSync("git", ["add", "."], { cwd: dir, stdio: "ignore" });
+	execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"], { cwd: dir, stdio: "ignore" });
+	fs.writeFileSync(path.join(dir, "dirty-before.txt"), "dirty\n");
+	const opened = openRun(dir, { ...makeReq(), cwd: dir });
+	const runner = new DelegateRunner(
+		opened,
+		{
+			agentDir: dir,
+			role: resolveRole("general", "general"),
+			task: "t",
+			runId: opened.metadata.runId,
+			parentModel: "lm/studio",
+			cwd: dir,
+			projectTrusted: true,
+			registeredTools: [],
+		},
+		FAST,
+		{},
+		fakeInvocation(FAKE_OK),
+	);
+	const outcome = await runner.run();
+	assert.equal(outcome.state, "succeeded");
+	const meta = JSON.parse(fs.readFileSync(opened.paths.metadataPath, "utf8"));
+	assert.match(meta.gitBase ?? "", /^[0-9a-f]{40}$/, "gitBase is the HEAD sha");
+	assert.match(meta.gitStatus ?? "", /dirty-before\.txt/, "pre-run dirty state captured");
+	assert.match(meta.gitDelta ?? "", /dirty-before\.txt/, "post-run delta vs HEAD captured");
+});
+
+// ── Structured-handoff protocol (mandatory, tool-enforced) ───────────────
+
+test("runner: direct handoff-tool submission — deterministic render, no enforcement", async () => {
+	const dir = tmpDir("ok-direct");
+	const script = `
+let buf = "";
+process.stdin.on("data", (c) => {
+  buf += c;
+  const lines = buf.split("\\n"); buf = lines.pop() ?? "";
+  for (const l of lines) {
+    const rec = JSON.parse(l);
+    if (rec.type === "prompt") {
+      process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "tool_execution_end", toolCallId: "h1", toolName: "handoff", result: { content: [], details: { delegateHandoff: { outcome: "done", summary: "DIRECT", changes: [{ path: "a.ts", action: "modified" }], verification: [{ command: "npm test", result: "pass" }], remaining: [], risks: [] } } } }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }], usage: {}, stopReason: "stop" } }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+      process.exit(0);
+    }
+  }
+});
+`;
+	const { runner } = spawnRunner(dir, script);
+	const outcome = await runner.run();
+	assert.equal(outcome.state, "succeeded");
+	assert.match(outcome.handoff, /- modified a\.ts/);
+	assert.match(outcome.handoff, /✓ npm test/);
+	assert.equal(JSON.parse(fs.readFileSync(runPaths(dir, runner.runId).metadataPath, "utf8")).handoffData?.summary, "DIRECT");
+});
+
+test("runner: child never complies — free-text fallback after bounded retries (no hang)", async () => {
+	const dir = tmpDir("ok-stubborn");
+	const script = `
+let buf = "";
+let count = 0;
+process.stdin.on("data", (c) => {
+  buf += c;
+  const lines = buf.split("\\n"); buf = lines.pop() ?? "";
+  for (const l of lines) {
+    const rec = JSON.parse(l);
+    if (rec.type === "prompt") {
+      count += 1;
+      process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "JUST TEXT " + count }], usage: {}, stopReason: "stop" } }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+    }
+  }
+});
+`;
+	const started = Date.now();
+	const { runner } = spawnRunner(dir, script, { ...FAST, hardTimeoutMs: 120_000 });
+	const outcome = await runner.run();
+	assert.equal(outcome.state, "succeeded");
+	assert.match(outcome.handoff, /JUST TEXT/, "free text accepted after enforcement retries");
+	const meta = JSON.parse(fs.readFileSync(runPaths(dir, runner.runId).metadataPath, "utf8"));
+	assert.ok((meta.errorMessage ?? "").includes("free-text handoff accepted"), "diagnostic note recorded");
+	assert.ok(Date.now() - started < 30_000, "bounded: enforcement never waits for the hard cap");
+});
+
+test("runner: silent-after-settle child hits the enforcement deadline, not the hard cap", async () => {
+	const dir = tmpDir("ok-silent-after-settle");
+	const script = `
+let buf = "";
+let done = false;
+process.stdin.on("data", (c) => {
+  if (done) return;
+  buf += c;
+  const lines = buf.split("\\n"); buf = lines.pop() ?? "";
+  for (const l of lines) {
+    const rec = JSON.parse(l);
+    if (rec.type === "prompt") {
+      done = true;
+      process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "ONE SHOT" }], usage: {}, stopReason: "stop" } }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+    }
+  }
+});
+`;
+	const started = Date.now();
+	const { runner } = spawnRunner(dir, script, { ...FAST, hardTimeoutMs: 120_000, inactivityTimeoutMs: 120_000, handoffEnforceTimeoutMs: 1500 });
+	const outcome = await runner.run();
+	assert.equal(outcome.state, "succeeded");
+	assert.match(outcome.handoff, /ONE SHOT/);
+	const meta = JSON.parse(fs.readFileSync(runPaths(dir, runner.runId).metadataPath, "utf8"));
+	assert.ok((meta.errorMessage ?? "").includes("free-text handoff accepted"), "fallback note");
+	assert.ok(Date.now() - started < 15_000, "finalized by the enforcement deadline, not the hard cap");
 });

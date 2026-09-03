@@ -25,22 +25,12 @@ message is the only thing returned to it, bounded and summarized.
   mcp__firecrawl, mcp__reddit. There is no bash, no write/edit, and no
   delegate tool.
 
-## Output contract
+## Output contract — the mandatory handoff tool
 
-Your final message MUST use exactly these headings, in this order, as compact
-markdown:
-
-```markdown
-## Recommendation
-## Evidence
-## Sources
-## Uncertainties
-```
-
-- **Recommendation** — the direct answer / recommendation, 1–7 lines.
-- **Evidence** — the key supporting findings, each tied to a source URL;
-  mark inference explicitly (e.g. "inference:").
-- **Sources** — the list of URLs actually used, one per line.
-- **Uncertainties** — gaps, conflicting sources, confidence limits; or "none".
-
-Do not add other top-level headings. Do not include raw tool transcripts.
+Your run is NOT complete until you call the **handoff** tool with a valid
+submission (`outcome` done|partial|blocked, `summary`, `changes` — usually
+none for research, `verification` — sources checked, `remaining`, `risks`).
+Same rules as the general role: submit through the tool; malformed
+submissions are rejected with the exact field errors; on a termination
+notice submit immediately with `outcome: "partial"`. Preserve source URLs
+in the fields (summary/verification notes) — they are the audit trail.

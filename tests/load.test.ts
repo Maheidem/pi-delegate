@@ -76,7 +76,8 @@ test("load: inert when PI_DELEGATE_CHILD=1", async () => {
 		const pi = mockPi();
 		(factory as (pi: unknown) => void)(pi);
 		assert.deepEqual(pi.commands, []);
-		assert.deepEqual(pi.tools, []);
+		// Child mode registers EXACTLY the mandatory structured-handoff tool.
+		assert.deepEqual(pi.tools, ["handoff"]);
 	} finally {
 		delete process.env.PI_DELEGATE_CHILD;
 	}

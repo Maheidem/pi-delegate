@@ -32,9 +32,12 @@ is performed by this package.
                                     tree-stable; active tool set becomes
                                     ['delegate'])
 /delegate off                     disable strict coordinator mode
-/delegate status                  mode, active/last run, tool registration
+/delegate status                  mode, active/last run, tool registration,
+                                    executing version (R7)
 /delegate inspect [runId]         metadata + bounded transcript/stderr
 /delegate cancel [runId]          cancel the active (or named) run
+/delegate resume <runId> <task>   continue a prior run's child session in the
+                                    SAME context (R3) — no cold re-explanation
 /delegate paths                   config/run-store locations
 /delegate doctor                  honest environment checks
 /delegate help                    syntax + examples
@@ -69,6 +72,88 @@ the same base-timeout line.
 
 Tool (`delegate`) is available to models: same semantics, JSON result with
 `ok`/`handoff`/`details` (usage, paths, state) or structured `error`.
+
+### Timeout semantics (read this before long validation/benchmark runs)
+
+Effective budgets per run, resolved as `per-invocation > project > user`:
+
+- **Hard** — wall-clock cap for the whole run (`hardTimeoutMs`, default 30 m).
+- **Idle** — no child output at all, with **no tool call in flight**
+  (`inactivityTimeoutMs`, default 5 m), **capped at hard/2** for any source.
+- **Stuck-tool** — no child output **while a tool call is in flight**
+  (`stuckToolTimeoutMs`, default = the hard timeout). A silent 40-minute test
+  matrix inside one `bash` call is *activity*, not a stall: the watchdog
+  leaves it alone until the stuck-tool budget (or the hard cap) is reached.
+
+Consequences worth internalizing:
+
+- A single tool call longer than **min(idle, hard/2)** used to be
+  *guaranteed killed* — that was the single largest failure class in the
+  2026-09-03 investigation (5 of 11 failures, 0 true positives). In-flight
+  tools now sit under the stuck-tool budget instead.
+- Per-run `--timeout` / the `timeout` parameter raises the hard cap **and**
+  (through the hard/2 cap) the idle cap. For long validation or benchmark
+  work, set `timeout` ≥ 2× the longest expected single tool call.
+- A genuinely silent child with no open tool still trips the idle watchdog
+  exactly as before.
+
+### Graceful timeout handoff (R2), durable sessions (R3), provider errors (R4)
+
+- On a **timeout kill**, the runner no longer goes straight to SIGTERM: it
+  aborts the in-flight turn, sends a bounded termination-notice prompt
+  ("files changed / work remaining / last verification state — answer from
+  context, no tools"), waits `handoffGraceMs` (default 90 s), and captures
+  the answer as **`partialHandoff`** on the receipt and in the tool result.
+  Post-mortem inspection becomes "read the handoff", not "re-read the tree".
+- Child sessions are **durable**: each run persists the child's pi session
+  under `<runsDir>/sessions/` and records `sessionPath` on the receipt.
+  `delegate({ resumeFrom: runId })` or `/delegate resume <runId> <task>`
+  re-enters that exact session — the new child sees all earlier turns, so a
+  killed run continues with **one prompt** instead of a cold re-explained
+  task. (Pre-0.2.0 runs have no session file and are not resumable.)
+- Provider failures are diagnosed from the provider's own
+  `errorMessage` on the final message (`E_PROVIDER_ERROR`, verbatim text —
+  e.g. `Codex error: The usage limit has been reached`). Abort artifacts
+  (`This operation was aborted`) are classified as killed-by-watchdog rather
+  than blamed on the provider, and the stderr tail is no longer presented as
+  the cause.
+
+### The mandatory structured handoff (protocol, not prompt)
+
+Anything the harness NEEDS from the child is a validated protocol step —
+never free text we hope has the right shape:
+
+- The delegate extension loads in child mode too and registers exactly one
+  tool: **`handoff`** (always in the child's tool ceiling). The child's run
+  does not complete until it submits a structured report:
+  `outcome` (`done|partial|blocked`), `summary`, `changes[]`
+  (`path`/`action`/`note`), `verification[]` (`command`/`result`/`note`),
+  `remaining[]` (required unless `done`), `risks[]`.
+- **Malformed submissions fail as tool errors** listing every invalid field,
+  so the child retries with the exact problems named.
+- A child that settles **without** submitting is re-prompted automatically
+  (bounded: 2 attempts, `handoffEnforceTimeoutMs` deadline — never the hard
+  cap), then its free-text ending is accepted with a diagnostic note
+  (older children without the tool still finish).
+- The parent-facing handoff text is **rendered deterministically** from the
+  validated fields; the receipt stores the raw structured payload as
+  `handoffData`. The kill-time partial handoff (R2) uses the same tool, so a
+  timed-out child's last act is a machine-checkable report.
+
+### Model pinning (R5), git checkpoints (R6), version provenance (R7)
+
+- `delegate({ model: "provider/model-id" })` pins the child model. Without
+  it the child silently inherits the parent's **current** model — if the
+  parent falls back mid-session (e.g. a usage limit), every child follows.
+  The resolved child model is echoed in live updates and the result header.
+- When the cwd is a git worktree, every receipt records `gitBase` (HEAD at
+  run start), `gitStatus` (pre-run dirty files) and `gitDelta` (post-run
+  `git diff --stat HEAD` + untracked files). "What did the dead child
+  change?" is `git diff <gitBase>`.
+- Every result header and `/delegate status` prints the **executing**
+  extension version. Extensions load at session start: newer installs only
+  apply after `/reload` in that session — the version line makes a stale
+  copy self-evident instead of indistinguishable from a regression.
 
 ## Safety model (selected invariants)
 

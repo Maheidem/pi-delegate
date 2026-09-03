@@ -8,6 +8,7 @@
  */
 
 import * as fs from "node:fs";
+import * as path from "node:path";
 import type {
 	CancelResult,
 	DelegateApplication,
@@ -205,6 +206,7 @@ export class DelegateApplicationImpl implements DelegateApplication {
 		// Config cascade: project .pi/delegate/config.json overlays the
 		// user-wide (live) config per run; missing file = live config.
 		let baseCfg: DelegateConfigV1 = this.liveConfig;
+		let projectSetsHard = false;
 		if (request.projectRoot) {
 			// Strip the overlay's diagnostic keys so only real config fields
 			// reach the runner (a spurious key would survive into metadata).
@@ -213,6 +215,7 @@ export class DelegateApplicationImpl implements DelegateApplication {
 				projectOverrides: string[];
 				projectCorrupt?: string;
 			};
+			projectSetsHard = projectOverrides.includes("hardTimeoutMs");
 			baseCfg = { ...(rest as unknown as DelegateConfigV1) } as DelegateConfigV1;
 		}
 
@@ -225,7 +228,14 @@ export class DelegateApplicationImpl implements DelegateApplication {
 			...baseCfg,
 			hardTimeoutMs: timeouts.hardMs,
 			inactivityTimeoutMs: timeouts.inactivityMs,
+			stuckToolTimeoutMs: timeouts.stuckToolMs,
 		};
+		// R7: timeout provenance for the result header, e.g.
+		// "hard 45m (per-run) · idle 22m30s · stuck-tool 45m".
+		const timeoutInfo =
+			`hard ${formatDuration(timeouts.hardMs)} (${request.timeoutMs !== undefined ? "per-run" : projectSetsHard ? "project" : "user"})` +
+			` · idle ${formatDuration(timeouts.inactivityMs)}` +
+			` · stuck-tool ${formatDuration(timeouts.stuckToolMs)}`;
 
 		// 2. Validate task (line endings, blank, byte limit).
 		const taskResult = validateTask(request.task, cfg.maxTaskBytes);
@@ -245,10 +255,29 @@ export class DelegateApplicationImpl implements DelegateApplication {
 			return errorResult("", role.name, "E_PROJECT_UNTRUSTED", "Project is not trusted; a write-capable child cannot run. Approve trust or use the research role.");
 		}
 
-		// 5. Model inheritance.
-		const model = request.parentModel?.trim();
+		// 5. Model resolution (R5): an explicit `model` pin wins; otherwise
+		// the parent's current model is inherited as before.
+		const model = request.model?.trim() || request.parentModel?.trim();
 		if (!model) {
-			return errorResult("", role.name, "E_MODEL_UNAVAILABLE", "No parent model available to inherit. Select or configure a model.");
+			return errorResult("", role.name, "E_MODEL_UNAVAILABLE", "No parent model available to inherit. Select or configure a model, or pass an explicit child model.");
+		}
+		const modelNote = request.model?.trim() && request.model!.trim() !== request.parentModel?.trim()
+			? `child model pinned to ${request.model!.trim()} (parent model ${request.parentModel || "none"} not inherited)`
+			: undefined;
+
+		// R3: resume — re-enter a prior run's durable child session.
+		let resumeOf: string | undefined;
+		let sessionPath: string | undefined;
+		if (request.resumeFrom) {
+			const prior = readRunMetadata(agentDir, request.resumeFrom);
+			if (!prior) {
+				return errorResult("", role.name, "E_STORE", `resumeFrom: no receipt for run ${request.resumeFrom}.`);
+			}
+			if (!prior.sessionPath || !fs.existsSync(prior.sessionPath)) {
+				return errorResult("", role.name, "E_STORE", `resumeFrom: run ${request.resumeFrom} has no durable child session on disk (pre-0.2.0 runs are not resumable).`);
+			}
+			resumeOf = prior.runId;
+			sessionPath = prior.sessionPath;
 		}
 
 		// 6. Role prompt readability.
@@ -264,6 +293,17 @@ export class DelegateApplicationImpl implements DelegateApplication {
 			return errorResult("", role.name, "E_STORE", `Run store could not initialize: ${(error as Error).message}`);
 		}
 
+		// R3: durable session storage for new runs (resumed runs re-enter
+		// the prior session file directly).
+		const sessionDir = sessionPath ? undefined : path.join(opened.paths.runsDir, "sessions");
+		if (sessionDir) {
+			try {
+				fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+			} catch {
+				// session capture is best-effort; the run still proceeds
+			}
+		}
+
 		// 8. Reservation NOW covers the child lifecycle.
 		const runner = new DelegateRunner(
 			opened,
@@ -277,6 +317,9 @@ export class DelegateApplicationImpl implements DelegateApplication {
 				cwd: request.cwd,
 				projectTrusted: request.projectTrusted,
 				registeredTools: this.lastRegisteredTools,
+				...(resumeOf ? { resumeOf } : {}),
+				...(sessionPath ? { sessionPath } : {}),
+				...(sessionDir ? { sessionDir } : {}),
 			},
 			cfg,
 			hooks,
@@ -299,7 +342,7 @@ export class DelegateApplicationImpl implements DelegateApplication {
 			} catch {
 				// cleanup failure is warning-only
 			}
-			return outcomeToRunResult(outcome, opened.metadata, role.name, model, request.thinkingLevel);
+			return outcomeToRunResult(outcome, opened.metadata, role.name, model, request.thinkingLevel, { timeoutInfo, modelNote });
 		} catch (error) {
 			this.activeRun = null;
 			return errorResult(opened.metadata.runId, role.name, "E_CHILD_EXIT", `Delegation failed unexpectedly: ${(error as Error).message}`);
@@ -609,6 +652,7 @@ function outcomeToRunResult(
 	role: RoleName,
 	model: string,
 	thinkingLevel?: string,
+	provenance?: { timeoutInfo?: string; modelNote?: string },
 ): DelegateRunResult {
 	const ok = outcome.state === "succeeded";
 	const details: DelegateDetails = {
@@ -626,14 +670,20 @@ function outcomeToRunResult(
 		usage: outcome.usage,
 		outputBytes: outcome.outputBytes,
 		outputTruncated: outcome.outputTruncated,
+		...(outcome.partialHandoff ? { partialHandoff: outcome.partialHandoff } : {}),
+		...(provenance?.timeoutInfo ? { timeoutInfo: provenance.timeoutInfo } : {}),
 		transcriptPath: outcome.transcriptPath,
 		stderrPath: outcome.stderrPath,
 		displayItems: outcome.displayItems,
 	};
+	const notes: string[] = [];
+	if (provenance?.modelNote) notes.push(provenance.modelNote);
+	if (outcome.partialHandoff) notes.push(`partial handoff captured (${Buffer.byteLength(outcome.partialHandoff, "utf8")} bytes) — inspect it before re-delegating or resume with resumeFrom: ${outcome.runId}`);
 	return {
 		ok,
 		handoff: outcome.handoff,
 		details,
+		...(notes.length ? { modelNote: notes.join("; ") } : {}),
 		...(outcome.error ? { error: outcome.error } : {}),
 	};
 }
