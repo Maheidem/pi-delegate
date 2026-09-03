@@ -32,8 +32,28 @@ try {
 }
 process.env.PI_CODING_AGENT_DIR = E2E_CFG;
 
+// The workspace copy under test must be the ONLY delegate extension loaded.
+// The live settings register the npm package too — drop that entry so the
+// project-local copy (this source tree) wins and E2E never runs stale code.
+try {
+	const settingsPath = path.join(E2E_CFG, "settings.json");
+	const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+	if (Array.isArray(settings.packages)) {
+		settings.packages = settings.packages.filter((p) => !String(p).includes("pi-delegate"));
+		fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+	}
+} catch {
+	// no settings to patch
+}
+
 const fails = [];
 let checks = 0;
+// Scenario filter for targeted runs: E2E_SCENARIOS=D,F (default: all).
+const SCENARIO_FILTER = (process.env.E2E_SCENARIOS ?? "")
+	.split(",")
+	.map((s) => s.trim().toUpperCase())
+	.filter(Boolean);
+const runScenario = (name) => SCENARIO_FILTER.length === 0 || SCENARIO_FILTER.includes(name);
 const ok = (cond, msg) => {
 	checks += 1;
 	if (!cond) {
@@ -287,6 +307,20 @@ function latestReceipt() {
 	return JSON.parse(fs.readFileSync(path.join(dir, files[0].f), "utf8"));
 }
 
+function isTerminalState(state) {
+	return ["succeeded", "failed", "cancelled", "timed_out_idle", "timed_out_hard", "crashed"].includes(state);
+}
+
+function readReceipt(runId) {
+	try {
+		return JSON.parse(fs.readFileSync(path.join(runsDir(), `${runId}.json`), "utf8"));
+	} catch {
+		return null;
+	}
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function main() {
 	if (!(await modelAvailable())) {
 		console.log("SKIP e2e: default model server not reachable");
@@ -295,6 +329,7 @@ async function main() {
 
 	// ── Scenario A: status/doctor + foreground run succeeds ──────────────
 	{
+		if (runScenario("A")) {
 		const dir = makeWorkspace();
 		const pi = startPi(dir);
 		await pi.prompt("/delegate status");
@@ -322,10 +357,12 @@ async function main() {
 			"A: transcript persisted",
 		);
 		await stop(pi);
+		}
 	}
 
 	// ── Scenario B: strict mode blocks non-delegate tools ────────────────
 	{
+		if (runScenario("B")) {
 		const dir = makeWorkspace();
 		const pi = startPi(dir);
 		await pi.prompt("/delegate on");
@@ -353,10 +390,12 @@ async function main() {
 		await pi.prompt("/delegate off");
 		ok(/disabled|off/i.test(pi.allText()), "B: disable acknowledged");
 		await stop(pi);
+		}
 	}
 
 	// ── Scenario C: cancellation produces terminal receipt ───────────────
 	{
+		if (runScenario("C")) {
 		const dir = makeWorkspace();
 		const pi = startPi(dir);
 		const runP = pi.prompt("/delegate run general Write a very long detailed essay counting slowly from 1 to 500. Do not stop early.", 420_000);
@@ -383,6 +422,99 @@ async function main() {
 			ok(true, "C: no live pid recorded");
 		}
 		await stop(pi);
+		}
+	}
+
+	// ── Scenario F: P3 — real idle timeout surfaces a specific error ────
+	{
+		if (runScenario("F")) {
+		const cfgPath = path.join(E2E_CFG, "delegate", "config.json");
+		fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+		// 15 s inactivity: a child that runs `sleep 60` must trip the
+		// inactivity watchdog — on a REAL child, not a fake one.
+		fs.writeFileSync(cfgPath, JSON.stringify({ inactivityTimeoutMs: 15_000 }));
+		const dir = makeWorkspace();
+		const pi = startPi(dir);
+		await pi.prompt(
+			"/delegate run general Run this exact bash command and wait for it to finish: sleep 60. Then reply SLEPT.",
+			240_000,
+		);
+		await stop(pi);
+		const done = latestReceipt();
+		ok(done?.state === "timed_out_idle", `F: real idle timeout (${done?.state})`);
+		ok(done?.errorCode === "E_TIMEOUT_IDLE", `F: errorCode E_TIMEOUT_IDLE (${done?.errorCode})`);
+		const t = pi.allText();
+		ok(t.includes("E_TIMEOUT_IDLE") && /no child activity/.test(t), "F: tool text carries the specific error");
+		ok(!/unknown failure/.test(t), "F: never 'unknown failure'");
+		fs.unlinkSync(cfgPath); // restore defaults for the later scenarios
+		}
+	}
+
+	// ── Scenario D: P1 — concurrent pi startup must NOT clobber a run ──
+	// The production bug: a second pi startup in the same agent dir marked a
+	// live run crashed (E_ORPHANED_RUN) while its owner was still running it.
+	{
+		if (runScenario("D")) {
+		const dirA = makeWorkspace();
+		const piA = startPi(dirA);
+		const runP = piA.prompt(
+			"/delegate run general Run this exact bash command and wait for it to finish: sleep 60. Then reply SLEPT-DONE.",
+			420_000,
+		);
+		const active = await awaitReceipt((m) => m.state === "running" && typeof m.pid === "number", 180_000);
+		ok(!!active, "D: run active with stored pid");
+		if (active) {
+			let alive = true;
+			try {
+				process.kill(active.pid, 0);
+			} catch {
+				alive = false;
+			}
+			ok(alive, "D: stored pid is alive");
+			// Continuous poll: if the run EVER becomes crashed, the clobber
+			// happened (a clobber is terminal — it can never be undone).
+			const watch = (async () => {
+				for (;;) {
+					const m = readReceipt(active.runId);
+					if (m?.state === "crashed") return "clobbered";
+					if (m && isTerminalState(m.state)) return m.state;
+					await sleep(250);
+				}
+			})();
+			// A SECOND pi in the same agent dir — its startup runs orphan
+			// recovery against the shared run store.
+			const dirB = makeWorkspace();
+			const piB = startPi(dirB);
+			await piB.prompt("/delegate status");
+			await stop(piB);
+			const finalState = await watch;
+			ok(finalState !== "clobbered", `D: run never clobbered by concurrent pi startup (final ${finalState})`);
+			await runP.catch(() => {});
+			ok(piA.allText().includes("SLEPT-DONE"), "D: child handoff surfaced");
+			const done = readReceipt(active.runId);
+			ok(done?.state === "succeeded", `D: run completed successfully (${done?.state})`);
+			ok(!(done?.errorCode ?? "").includes("ORPHANED"), "D: no orphaned-run error on receipt");
+		}
+		await stop(piA);
+		}
+	}
+
+	// ── Scenario E: P2 — project overlay surfaces 2h hard in status ────
+	{
+		if (runScenario("E")) {
+		const dir = makeWorkspace();
+		fs.mkdirSync(path.join(dir, ".pi", "delegate"), { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, ".pi", "delegate", "config.json"),
+			JSON.stringify({ hardTimeoutMs: 7_200_000 }),
+		);
+		const pi = startPi(dir);
+		await pi.prompt("/delegate status");
+		const s = pi.allText();
+		ok(/base timeout: 2h hard/.test(s), `E: status shows project 2h hard base timeout`);
+		ok(/\(project /.test(s), "E: source attributed to the project file");
+		await stop(pi);
+		}
 	}
 
 	console.log(`\nE2E checks: ${checks - fails.length}/${checks}`);

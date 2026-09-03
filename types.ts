@@ -195,6 +195,8 @@ export interface RunMetadataV1 {
 	finalHandoff?: string;
 	transcriptPath: string;
 	stderrPath: string;
+	/** Present only on manually curated receipts (one-time data repair). */
+	curationNote?: string;
 }
 
 export interface TranscriptRecordV1 {

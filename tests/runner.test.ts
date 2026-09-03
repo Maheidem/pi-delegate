@@ -162,6 +162,13 @@ process.stdin.on("data", (c) => {
 	const outcome = await runner.run();
 	assert.equal(outcome.state, "timed_out_idle");
 	assert.ok(outcome.finishedAt);
+	// P3: the terminal state carries a specific error payload — never
+	// "unknown failure".
+	assert.equal(outcome.error?.code, "E_TIMEOUT_IDLE");
+	assert.match(outcome.error?.message ?? "", /no child activity for/);
+	const meta = JSON.parse(fs.readFileSync(runPaths(dir, runner.runId).metadataPath, "utf8"));
+	assert.equal(meta.errorCode, "E_TIMEOUT_IDLE");
+	assert.match(meta.errorMessage ?? "", /no child activity for/);
 });
 
 test("runner: hard timeout wins over silence", async () => {
@@ -181,6 +188,12 @@ process.stdin.on("data", (c) => {
 	const { runner } = spawnRunner(dir, script, { ...FAST, hardTimeoutMs: 1500, inactivityTimeoutMs: 10_000 });
 	const outcome = await runner.run();
 	assert.equal(outcome.state, "timed_out_hard");
+	// P3: hard timeout carries its specific error payload.
+	assert.equal(outcome.error?.code, "E_TIMEOUT_HARD");
+	assert.match(outcome.error?.message ?? "", /hard timeout of/);
+	const meta = JSON.parse(fs.readFileSync(runPaths(dir, runner.runId).metadataPath, "utf8"));
+	assert.equal(meta.errorCode, "E_TIMEOUT_HARD");
+	assert.match(meta.errorMessage ?? "", /hard timeout of/);
 });
 
 test("runner: cancel idempotent; abort → SIGTERM path; single finalize", async () => {
@@ -209,6 +222,32 @@ process.stdin.on("data", (c) => {
 	const meta = JSON.parse(fs.readFileSync(runPaths(dir, runner.runId).metadataPath, "utf8"));
 	assert.equal(meta.state, "cancelled");
 	assert.ok(meta.finishedAt);
+	// P3: user cancel carries its specific error payload.
+	assert.equal(outcome.error?.code, "E_CANCELLED");
+	assert.match(outcome.error?.message ?? "", /cancelled by user/);
+	assert.equal(meta.errorCode, "E_CANCELLED");
+	assert.match(meta.errorMessage ?? "", /cancelled by user/);
+});
+
+test("runner: P3 — settled with aborted stopReason → cancelled + abort message", async () => {
+	const dir = tmpDir("p3-abort");
+	const script = `
+let buf = "";
+process.stdin.on("data", (c) => {
+  buf += c;
+  if (buf.includes("\\n")) {
+    const rec = JSON.parse(buf.split("\\n")[0]);
+    process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
+    process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "partial" }], stopReason: "aborted" } }) + "\\n");
+    process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+  }
+});
+`;
+	const { runner } = spawnRunner(dir, script);
+	const outcome = await runner.run();
+	assert.equal(outcome.state, "cancelled");
+	assert.equal(outcome.error?.code, "E_CANCELLED");
+	assert.match(outcome.error?.message ?? "", /aborted/);
 });
 
 test("runner: stubborn child survives SIGTERM, gets SIGKILL", async () => {

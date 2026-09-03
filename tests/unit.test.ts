@@ -7,8 +7,9 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as childProcess from "node:child_process";
 
-import { DEFAULT_DELEGATE_CONFIG, normalizeConfig, loadConfig, saveConfig, atomicWriteJson } from "../config.ts";
+import { DEFAULT_DELEGATE_CONFIG, normalizeConfig, loadConfig, saveConfig, atomicWriteJson, loadConfigCascade, resolveRunTimeouts } from "../config.ts";
 import { parseDelegateCommand, validateTask, delegateCompletions } from "../commands.ts";
 import { DELEGATE_ROLES, isRoleName, resolveRole, intersectRoleTools, rolePromptExists } from "../roles.ts";
 import {
@@ -25,7 +26,7 @@ import {
 } from "../mode.ts";
 import { RpcJsonlParser, classifyRpcRecord } from "../rpc-jsonl.ts";
 import { truncateHandoff, buildChildArgs } from "../runner.ts";
-import { makeRunId, openRun, readRunMetadata, updateRunMetadata, listRuns, markOrphanedRuns, enforceRetention, runPaths, appendTranscriptRecord } from "../run-store.ts";
+import { makeRunId, openRun, readRunMetadata, updateRunMetadata, listRuns, markOrphanedRuns, enforceRetention, runPaths, appendTranscriptRecord, isPidAlive, pidCommandLine, commandLineIsPi } from "../run-store.ts";
 import type { DelegateRequest, SessionEntryLike, ModeTransitionContext } from "../types.ts";
 
 function tmpDir(prefix: string): string {
@@ -482,6 +483,108 @@ test("store: orphan recovery marks nonterminal without owned child", () => {
 	const m = readRunMetadata(dir, opened.metadata.runId);
 	assert.equal(m?.state, "crashed");
 	assert.equal(m?.errorCode, "E_ORPHANED_RUN");
+});
+
+test("store: P1 detectors (isPidAlive / pidCommandLine / commandLineIsPi)", () => {
+	assert.equal(isPidAlive(0), false);
+	assert.equal(isPidAlive(-7), false);
+	const deadPid = childProcess.spawnSync(process.execPath, ["-e", ""]).pid ?? -1;
+	assert.ok(deadPid > 0);
+	assert.equal(isPidAlive(deadPid), false, "exited pid must be dead");
+	assert.equal(isPidAlive(process.pid), true, "own pid must be alive");
+	assert.ok(commandLineIsPi("pi --mode rpc --session /tmp/x.jsonl"));
+	assert.ok(commandLineIsPi("/opt/homebrew/bin/pi --mode rpc"));
+	assert.ok(commandLineIsPi("node /opt/homebrew/bin/pi --mode rpc"));
+	assert.ok(
+		commandLineIsPi(
+			"node /opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --mode rpc",
+		),
+	);
+	assert.equal(commandLineIsPi("/bin/sleep 30"), false);
+	assert.equal(commandLineIsPi("node /path/scripts/pi-mcp-server.mjs serve"), false);
+});
+
+test("store: P1 — live pi-cmdline owner is skipped; after death it is marked", async () => {
+	const dir = tmpDir("p1-pi");
+	const opened = openRun(dir, req());
+	opened.stdout.end();
+	opened.stderr.end();
+	// A real process whose argv[0] basename is `pi` — the cmdline contract
+	// of a delegate child without booting a full pi session.
+	const fakePi = path.join(dir, "pi");
+	fs.writeFileSync(fakePi, "#!/bin/sh\nsleep 30\n");
+	fs.chmodSync(fakePi, 0o755);
+	const child = childProcess.spawn(fakePi, [], { stdio: "ignore" });
+	await new Promise((r) => setTimeout(r, 200));
+	updateRunMetadata(dir, opened.metadata.runId, (m) => ({ ...m, state: "running", pid: child.pid }));
+	const marked = markOrphanedRuns(dir);
+	assert.ok(!marked.includes(opened.metadata.runId), "live pi owner must be skipped");
+	assert.equal(readRunMetadata(dir, opened.metadata.runId)?.state, "running");
+	try {
+		child.kill("SIGKILL");
+	} catch {
+		// ignore
+	}
+	await new Promise((r) => setTimeout(r, 300));
+	const marked2 = markOrphanedRuns(dir);
+	assert.ok(marked2.includes(opened.metadata.runId), "dead pid must be marked");
+	assert.equal(readRunMetadata(dir, opened.metadata.runId)?.state, "crashed");
+});
+
+test("store: P1 — alive non-pi pid (recycled) is marked with a note", async () => {
+	const dir = tmpDir("p1-recycled");
+	const opened = openRun(dir, req());
+	opened.stdout.end();
+	opened.stderr.end();
+	const child = childProcess.spawn("/bin/sleep", ["30"], { stdio: "ignore" });
+	await new Promise((r) => setTimeout(r, 200));
+	updateRunMetadata(dir, opened.metadata.runId, (m) => ({ ...m, state: "running", pid: child.pid }));
+	const marked = markOrphanedRuns(dir);
+	assert.ok(marked.includes(opened.metadata.runId), "recycled pid must be marked");
+	const m = readRunMetadata(dir, opened.metadata.runId);
+	assert.equal(m?.state, "crashed");
+	assert.equal(m?.errorCode, "E_ORPHANED_RUN");
+	assert.match(m?.errorMessage ?? "", /recycled pid/);
+	try {
+		child.kill("SIGKILL");
+	} catch {
+		// ignore
+	}
+});
+
+test("store: P1 — markOrphanedRuns never touches terminal runs", () => {
+	const dir = tmpDir("p1-terminal");
+	const o = openRun(dir, req());
+	o.stdout.end();
+	o.stderr.end();
+	updateRunMetadata(dir, o.metadata.runId, (m) => ({ ...m, state: "succeeded", finishedAt: new Date().toISOString() }));
+	const marked = markOrphanedRuns(dir);
+	assert.equal(marked.length, 0);
+	assert.equal(readRunMetadata(dir, o.metadata.runId)?.state, "succeeded");
+});
+
+test("config: P2 — project overlay 2h hard + 44m user idle survive the cascade", () => {
+	const dir = tmpDir("p2-cascade");
+	const projectRoot = path.join(dir, "project");
+	fs.mkdirSync(path.join(projectRoot, ".pi", "delegate"), { recursive: true });
+	fs.writeFileSync(
+		path.join(projectRoot, ".pi", "delegate", "config.json"),
+		JSON.stringify({ hardTimeoutMs: 7_200_000 }),
+	);
+	fs.mkdirSync(path.join(dir, "delegate"), { recursive: true });
+	fs.writeFileSync(
+		path.join(dir, "delegate", "config.json"),
+		JSON.stringify({ inactivityTimeoutMs: 2_640_000, hardTimeoutMs: 3_600_000 }),
+	);
+	const result = loadConfigCascade(dir, projectRoot);
+	assert.equal(result.config.hardTimeoutMs, 7_200_000);
+	assert.equal(result.config.inactivityTimeoutMs, 2_640_000, "user idle value preserved");
+	assert.ok(result.projectOverrides.includes("hardTimeoutMs"));
+	const t = resolveRunTimeouts(result.config);
+	assert.equal(t.hardMs, 7_200_000);
+	assert.equal(t.inactivityMs, 2_640_000, "44m < 2h/2 → no cap");
+	const capped = resolveRunTimeouts({ ...result.config, inactivityTimeoutMs: 999_000_000 });
+	assert.equal(capped.inactivityMs, 3_600_000, "inactivity capped at half of hard");
 });
 
 test("store: retention keeps newest N plus active", () => {

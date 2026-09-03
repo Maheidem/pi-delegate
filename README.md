@@ -80,8 +80,24 @@ Tool (`delegate`) is available to models: same semantics, JSON result with
   ignored, never dropped.
 - Cancellation is idempotent (first wins): RPC abort → SIGTERM → SIGKILL;
   every finalization reaps the child exactly once.
+- Startup orphan recovery only marks a nonterminal run `crashed` /
+  `E_ORPHANED_RUN` when its stored pid is dead or provably not a pi process
+  (recycled pid). A live pi process owns its runs — a concurrent pi session
+  (the multi-session pattern) never clobbers a run that another live pi
+  process is running or finalizing; live pids with unreadable command lines
+  are left alone (fail-safe, never clobber on doubt). This process never kills
+  a pid it finds in stale metadata.
+- Every terminal failure state carries a specific error payload: timeout and
+  cancel states reached without one (timers, user cancels) synthesize
+  `E_TIMEOUT_IDLE` / `E_TIMEOUT_HARD` / `E_CANCELLED` with a descriptive
+  message at finalization, in both the receipt and the tool text — the error
+  line never degrades to `unknown failure`.
 - Run-store is `0700` with `0600` receipt/transcript/stderr files; corrupt
-  config is preserved as evidence and defaults are loaded.
+  config is preserved as evidence and defaults are loaded. Manual data
+  repairs are recorded on the receipt in a `curationNote` field (one-time
+  2026-09-03 repair: receipts clobbered by pre-0.1.5 orphan recovery and
+  later removed by retention were reconstructed from the parent sessions'
+  delegate tool results — see `.planning/`, excluded from the npm tarball).
 - Strict mode is session-scoped, replayed per branch (tree/resume/fork safe),
   persisted via session custom entries; persistence failures degrade loudly
   but never silently disable the gate.
@@ -94,6 +110,7 @@ Tool (`delegate`) is available to models: same semantics, JSON result with
 npm run typecheck   # strict tsc, no emit
 npm test            # unit + runner (real RPC children) + application + UI + load
 npm run test:e2e    # real pi session E2E (needs a working default model)
+                    # E2E_SCENARIOS=D,F runs a targeted subset
 ```
 
 Design: `types.ts`/`config.ts`/`mode.ts`/`run-store.ts`/`rpc-jsonl.ts`/

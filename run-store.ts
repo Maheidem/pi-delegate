@@ -11,6 +11,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
+import * as childProcess from "node:child_process";
 import type {
 	DelegatePaths,
 	DelegateRequest,
@@ -258,22 +259,107 @@ export function listRuns(agentDir: string, limit = 50): RunSummary[] {
 }
 
 /**
- * Startup orphan recovery (§10.6): nonterminal metadata with no owned
- * process becomes `crashed` with E_ORPHANED_RUN. This process NEVER kills
- * a PID found in stale metadata. Returns the touched run IDs.
+ * Signal-0 liveness probe: `process.kill(pid, 0)` sends no signal. EPERM
+ * means the pid exists (owned by another user) — treat as alive; ESRCH and
+ * any other error mean the pid is gone.
+ */
+export function isPidAlive(pid: number): boolean {
+	if (!Number.isInteger(pid) || pid <= 1) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/**
+ * Best-effort read of another process's command line:
+ *  - Linux: /proc/<pid>/cmdline (NUL-separated args);
+ *  - elsewhere (macOS): `ps -o args= -p <pid>` (single line, no header).
+ * Returns null when the pid is dead or the cmdline cannot be read.
+ */
+export function pidCommandLine(pid: number): string | null {
+	if (!isPidAlive(pid)) return null;
+	if (process.platform === "linux") {
+		try {
+			const text = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8")
+				.replace(/\0+/g, " ")
+				.trim();
+			return text.length > 0 ? text : null;
+		} catch {
+			return null;
+		}
+	}
+	try {
+		const out = childProcess.spawnSync("ps", ["-o", "args=", "-p", String(pid)], {
+			encoding: "utf8",
+			timeout: 2_000,
+		});
+		if (out.error || out.status !== 0) return null;
+		const text = (out.stdout ?? "").trim();
+		return text.length > 0 ? text : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * True when the command line belongs to a Pi process (a delegate child, or
+ * a concurrent pi parent owning a run): any whitespace-split token whose
+ * path basename is exactly `pi` (covers `pi --mode rpc ...`,
+ * `/opt/homebrew/bin/pi ...`, `node /opt/homebrew/bin/pi ...`), or a path
+ * under the pi-coding-agent package (covers
+ * `node .../pi-coding-agent/dist/bundle/cli.js ...`).
+ */
+export function commandLineIsPi(cmdline: string): boolean {
+	for (const token of cmdline.trim().split(/\s+/)) {
+		if (token && path.basename(token) === "pi") return true;
+	}
+	return cmdline.includes("pi-coding-agent");
+}
+
+/**
+ * Startup orphan recovery (§10.6): nonterminal metadata whose owned process
+ * is gone becomes `crashed` with E_ORPHANED_RUN. This process NEVER kills a
+ * PID found in stale metadata.
+ *
+ * P1: a live pi process owns its runs — concurrent multi-session pi (the
+ * pattern documented in AGENTS.md) must never clobber a run that another
+ * live pi process is actively running or finalizing. Decision table per
+ * nonterminal run:
+ *  - no stored pid, or pid dead          → mark crashed (unchanged);
+ *  - pid alive, cmdline is pi            → SKIP (live delegate owner);
+ *  - pid alive, cmdline known, not pi    → mark crashed (recycled PID);
+ *  - pid alive, cmdline unreadable       → SKIP (fail-safe: never clobber on doubt).
+ * Returns the touched run IDs.
  */
 export function markOrphanedRuns(agentDir: string): string[] {
 	const touched: string[] = [];
 	for (const summary of listRuns(agentDir)) {
 		if (isTerminalRunState(summary.state)) continue;
 		try {
-			const next = updateRunMetadata(agentDir, summary.runId, (current) => ({
-				state: "crashed",
-				errorCode: "E_ORPHANED_RUN",
-				errorMessage: "Run store started with this run nonterminal and no owned child process.",
-				finishedAt: current.finishedAt ?? new Date().toISOString(),
-			}));
-			if (next.state === "crashed") touched.push(summary.runId);
+			const storedPid = readRunMetadata(agentDir, summary.runId)?.pid;
+			if (typeof storedPid === "number" && isPidAlive(storedPid)) {
+				const cmdline = pidCommandLine(storedPid);
+				if (cmdline === null) continue; // fail-safe: alive but unreadable
+				if (commandLineIsPi(cmdline)) continue; // live pi owner
+				const next = updateRunMetadata(agentDir, summary.runId, (current) => ({
+					state: "crashed",
+					errorCode: "E_ORPHANED_RUN",
+					errorMessage: `Run store started with this run nonterminal; stored pid ${storedPid} is alive but not a pi process (recycled pid), so the run has no owner.`,
+					finishedAt: current.finishedAt ?? new Date().toISOString(),
+				}));
+				if (next.state === "crashed") touched.push(summary.runId);
+			} else {
+				const next = updateRunMetadata(agentDir, summary.runId, (current) => ({
+					state: "crashed",
+					errorCode: "E_ORPHANED_RUN",
+					errorMessage: "Run store started with this run nonterminal and no owned child process.",
+					finishedAt: current.finishedAt ?? new Date().toISOString(),
+				}));
+				if (next.state === "crashed") touched.push(summary.runId);
+			}
 		} catch {
 			// skip
 		}

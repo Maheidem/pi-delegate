@@ -25,6 +25,7 @@ import type {
 import { EMPTY_USAGE } from "./types.ts";
 import { classifyRpcRecord, RpcJsonlParser, type RpcRecord } from "./rpc-jsonl.ts";
 import { appendTranscriptRecord, updateRunMetadata, type OpenedRun } from "./run-store.ts";
+import { formatDuration } from "./config.ts";
 
 export interface RunnerConfig {
 	maxResultBytes: number;
@@ -603,7 +604,13 @@ export class DelegateRunner {
 		this.finalizing = true;
 		const finishedAt = new Date().toISOString();
 		const durationMs = this.startedAtMs ? Date.now() - this.startedAtMs : 0;
-		this.finalError = error ?? this.finalError;
+		// P3: timeout/cancel terminal states are reached without an explicit
+		// error (timers and user cancels funnel through finish() bare).
+		// Synthesize a specific payload so the tool text never degrades to
+		// "unknown failure" — the header shows the state; the error line must
+		// agree. Flows into both the metadata and the reported outcome.
+		const effectiveError = error ?? this.synthesizedTerminalError(state);
+		this.finalError = effectiveError ?? this.finalError;
 		const usage = { ...(extra?.usage ?? this.usage), turns: this.turns };
 		const metadataPatch: Record<string, unknown> = {
 			state,
@@ -617,9 +624,9 @@ export class DelegateRunner {
 			metadataPatch.outputBytes = Buffer.byteLength(extra.handoff, "utf8");
 		}
 		if (extra?.stopReason) metadataPatch.stopReason = extra.stopReason;
-		if (error) {
-			metadataPatch.errorCode = error.code;
-			metadataPatch.errorMessage = error.message;
+		if (effectiveError) {
+			metadataPatch.errorCode = effectiveError.code;
+			metadataPatch.errorMessage = effectiveError.message;
 		}
 		if (this.diagnosticNotes.length > 0) {
 			metadataPatch.errorMessage = metadataPatch.errorMessage
@@ -643,10 +650,37 @@ export class DelegateRunner {
 		this.reapChild();
 		this.cleanup();
 
-		const outcome = this.outcome(state, extra, error);
+		const outcome = this.outcome(state, extra, effectiveError);
 		const resolver = this.settledResolver;
 		this.settledResolver = null;
 		resolver?.(outcome);
+	}
+
+	/**
+	 * P3: specific error payloads for the terminal states reached without an
+	 * explicit error. `succeeded`/`failed` already carry their error at the
+	 * call site (or legitimately have none) and are unaffected.
+	 */
+	private synthesizedTerminalError(state: RunTerminalState): DelegateError | undefined {
+		switch (state) {
+			case "timed_out_idle":
+				return {
+					code: "E_TIMEOUT_IDLE",
+					message: `no child activity for ${formatDuration(this.cfg.inactivityTimeoutMs)} (inactivity watchdog)`,
+				};
+			case "timed_out_hard":
+				return {
+					code: "E_TIMEOUT_HARD",
+					message: `hard timeout of ${formatDuration(this.cfg.hardTimeoutMs)} reached (wall-clock cap)`,
+				};
+			case "cancelled":
+				return {
+					code: "E_CANCELLED",
+					message: this.cancelledByUser ? "cancelled by user" : "aborted (parent session abort)",
+				};
+			default:
+				return undefined;
+		}
 	}
 
 	private outcome(
