@@ -190,7 +190,8 @@ test("ui: PeekView renders width-safe with live/final modes", () => {
 		}
 		const all = lines.map(strip).join("\n");
 		assert.ok(all.includes("live — following") || all.includes("final —"), `live=${live}: mode label`);
-		assert.ok(all.includes("earlier event(s)"), `live=${live}: bounded window with scroll hint`);
+		assert.ok(/\u2191\d/.test(all) || all.includes("no activity"), `live=${live}: bounded window with scroll hint`);
+		assert.equal(lines.length, 20, `live=${live}: overlay fixed at 20 rows`);
 		assert.ok(lines.length <= 26, `live=${live}: overlay stays in the panel budget`);
 	}
 });
@@ -207,7 +208,9 @@ test("ui: PeekView scrolling disables follow, f re-enables, q closes", () => {
 	const before = view.render(80).map(strip).join("\n");
 	view.handleInput("j"); // scroll up: follow off
 	const after = view.render(80).map(strip).join("\n");
-	assert.ok(after.includes("newer event(s)") || after !== before, "scroll moved the window");
+	assert.ok(after.includes("\u2193") || after !== before, "scroll moved the window");
+	assert.equal(view.render(80).length, 20, "peek height fixed at 20");
+	assert.equal(view.render(120).length, 20, "peek height stable at width 120");
 	view.handleInput("f"); // follow again
 	const refollowed = view.render(80).map(strip).join("\n");
 	assert.ok(refollowed.includes("live — following"), "f re-enables follow");

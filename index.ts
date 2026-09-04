@@ -524,7 +524,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 				return renderFeedEvents([...feed.all()], {
 					startMs: feedStartMs || Date.now(),
 					maxChars: 150,
-					maxEvents: 14,
+					maxEvents: 6,
 				});
 			};
 			const runPromise = app.run(request, {
@@ -779,6 +779,14 @@ export default function delegateExtension(pi: ExtensionAPI) {
 							const view = new PeekView({ theme, keybindings, state, done: wrappedDone });
 							timer = setInterval(() => tui.requestRender(), 1000);
 							return view;
+						}, {
+							overlay: true,
+							overlayOptions: {
+								width: "92%",
+								minWidth: 60,
+								maxHeight: "80%",
+								anchor: "center",
+							},
 						});
 					} else {
 						const { startMs, events } = feedEventsFromTranscript(meta.transcriptPath, { maxEvents: 400 });

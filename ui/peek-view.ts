@@ -26,6 +26,11 @@ export interface PeekViewHost {
 	done(result: { closed?: boolean }): void;
 }
 
+/** Fixed overlay height — rows never change between frames (smear guard). */
+const PEEK_ROWS = 20;
+/** Content rows inside the fixed frame (top + summary + status + bottom = 4). */
+const CONTENT_ROWS = PEEK_ROWS - 4;
+
 export class PeekView implements Component {
 	private readonly host: PeekViewHost;
 	private offsetFromEnd = 0;
@@ -44,11 +49,12 @@ export class PeekView implements Component {
 			(kb?.matches?.(data, "tui.select.cancel") ?? false) ||
 			matchesKey(data, "escape") ||
 			matchesKey(data, "q");
+		const maxOffset = Math.max(0, this.host.state().lines.length - CONTENT_ROWS);
 		if (cancel) {
 			this.host.done({ closed: true });
 		} else if (up) {
 			this.following = false;
-			this.offsetFromEnd += 1;
+			this.offsetFromEnd = Math.min(maxOffset, this.offsetFromEnd + 1);
 		} else if (down) {
 			this.offsetFromEnd = Math.max(0, this.offsetFromEnd - 1);
 			if (this.offsetFromEnd === 0) this.following = true;
@@ -66,43 +72,46 @@ export class PeekView implements Component {
 		const s = this.host.state();
 		const theme = this.host.theme;
 		const w = Math.max(1, Math.floor(width));
-		const fg = (kind: ThemeColor, text: string) => (theme?.fg ? theme.fg(kind, text) : text);
-		const title = ` Peek · ${s.title} `;
-		const top = `╭─${truncateToWidth(title, Math.max(4, w - 4))}${"─".repeat(Math.max(0, w - 3 - Math.min(title.length, Math.max(4, w - 4))))}─╮`;
-		const bottom = `╰${"─".repeat(Math.max(0, w - 2))}╯`;
 		const inner = Math.max(1, w - 4);
+
+		// Borders stay UNSTYLED so Pi's per-frame width/clear math is exact;
+		// color is applied to inner text only.
+		const title = truncateToWidth(` Peek · ${s.title} `, Math.max(4, w - 4));
+		const top = truncateToWidth(`╭─${title}${"─".repeat(Math.max(0, w - 2 - title.length - 1))}╮`, w);
+		const bottom = truncateToWidth(`╰${"─".repeat(Math.max(0, w - 2))}╯`, w);
 		const pad = (text: string, color?: ThemeColor) => {
-			const line = `│ ${truncateToWidth(text, inner)} │`;
-			return color && theme?.fg ? theme.fg(color, line) : line;
+			const body = color && theme?.fg ? theme.fg(color, truncateToWidth(text, inner)) : truncateToWidth(text, inner);
+			return `│ ${body} │`;
 		};
 
-		// Viewport: keep the overlay in the 20–24 line budget.
-		const maxFeed = Math.max(1, 20 - 4);
+		// Fixed-height viewport: exactly CONTENT_ROWS, newest at the bottom
+		// (blank-padded at the top) so the frame height never changes.
 		const total = s.lines.length;
 		if (total !== this.lastLineCount && this.following) this.offsetFromEnd = 0;
 		this.lastLineCount = total;
-		const end = Math.max(0, total - this.offsetFromEnd);
-		const start = Math.max(0, end - maxFeed);
+		const maxOffset = Math.max(0, total - CONTENT_ROWS);
+		if (this.offsetFromEnd > maxOffset) this.offsetFromEnd = maxOffset;
+		const end = total - this.offsetFromEnd;
+		const start = Math.max(0, end - CONTENT_ROWS);
 		const window = s.lines.slice(start, end);
+		const content = [...Array<string>(Math.max(0, CONTENT_ROWS - window.length)).fill(""), ...window];
+
+		const counts = [start > 0 ? `↑${start}` : "", end < total ? `↓${total - end}` : ""].filter(Boolean).join(" ");
+		const status = s.live
+			? `● live — following · j/k scroll · f re-follow · q close${counts ? ` · ${counts}` : ""}`
+			: `final — ${total} event(s) · j/k scroll · q close${counts ? ` · ${counts}` : ""}`;
 
 		const lines: string[] = [
-			truncateToWidth(top, w),
-			pad(s.summary, "muted"),
-			pad(
-				s.live
-					? fg("success", `● live — following (j/k scroll, f re-follow, q close)`)
-					: `final — ${total} events (j/k scroll, q close)`,
-				s.live ? "success" : "dim",
-			),
+			top,
+			pad(truncateToWidth(s.summary, inner), "muted"),
+			pad(status, s.live ? "success" : "dim"),
+			...content.map((l) => pad(l, l ? "text" : undefined)),
+			bottom,
 		];
-		if (total === 0) {
-			lines.push(pad("no activity captured", "muted"));
-		} else {
-			for (const line of window) lines.push(pad(line));
-			if (start > 0) lines.push(pad(`… ${start} earlier event(s) — j to scroll up`, "dim"));
-			if (end < total) lines.push(pad(`… ${total - end} newer event(s) — k to scroll down`, "dim"));
-		}
-		lines.push(truncateToWidth(bottom, w));
-		return lines.map((l) => (visibleWidth(l) > w ? truncateToWidth(l, w) : l));
+
+		// Belt-and-braces: exact height, exact width.
+		const clipped = lines.slice(0, PEEK_ROWS);
+		while (clipped.length < PEEK_ROWS) clipped.splice(clipped.length - 1, 0, pad(""));
+		return clipped.map((l) => (visibleWidth(l) > w ? truncateToWidth(l, w) : l));
 	}
 }
