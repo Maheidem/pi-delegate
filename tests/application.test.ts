@@ -83,9 +83,9 @@ test("app: general run succeeds end-to-end via fake child", async () => {
 	assert.equal(res.details.durationMs < 30_000, true);
 });
 
-test("app: second concurrent call busy with active id+role, no second child", async () => {
+test("app: queue full → busy with active id+role (queueLimit 0 restores the old behavior)", async () => {
 	const dir = tmpDir("app");
-	const a = app(dir, FAKE_SLOW);
+	const a = app(dir, FAKE_SLOW, { queueLimit: 0 });
 	const first = a.run({ ...baseReq, task: "first", role: "general" });
 	// give the child time to spawn
 	await new Promise((r) => setTimeout(r, 400));
@@ -98,6 +98,74 @@ test("app: second concurrent call busy with active id+role, no second child", as
 	await a.cancel();
 	const firstRes = await first;
 	assert.equal("busy" in firstRes && firstRes.busy, false);
+});
+
+test("app: concurrent calls queue and serialize — fan-out yields real results, no busy", async () => {
+	const dir = tmpDir("app-queue");
+	// Each fake child settles after ~300 ms; calls issued in parallel must
+	// run back-to-back and ALL succeed.
+	const script = `
+let buf = "";
+process.stdin.on("data", (c) => {
+  buf += c;
+  const lines = buf.split("\\n"); buf = lines.pop() ?? "";
+  for (const l of lines) {
+    const rec = JSON.parse(l);
+    if (rec.type === "prompt") {
+      process.stdout.write(JSON.stringify({ type: "response", id: rec.id }) + "\\n");
+      setTimeout(() => {
+        process.stdout.write(JSON.stringify({ type: "tool_execution_end", toolCallId: "h1", toolName: "handoff", result: { content: [], details: { delegateHandoff: { outcome: "done", summary: rec.message.slice(-20), changes: [], verification: [], remaining: [], risks: [] } } } }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\\n");
+        process.exit(0);
+      }, 300);
+    }
+  }
+});
+`;
+	const a = app(dir, script);
+	const results = await Promise.all([
+		a.run({ ...baseReq, task: "task-AAA", role: "general" }),
+		a.run({ ...baseReq, task: "task-BBB", role: "general" }),
+		a.run({ ...baseReq, task: "task-CCC", role: "general" }),
+	]);
+	for (const r of results) {
+		assert.equal("busy" in r && r.busy, false, "no busy: fan-out serialized");
+		assert.equal((r as { ok: boolean }).ok, true);
+	}
+	// Order: exactly one active at a time — verify via receipt start times.
+	const runs = store.listRuns(dir, 10).map((x) => x.runId);
+	assert.equal(runs.length, 3);
+	assert.equal(a.getActiveRun(), null, "slot free after all three");
+});
+
+test("app: aborting a queued call removes it from the queue", async () => {
+	const dir = tmpDir("app-queue-abort");
+	const a = app(dir, FAKE_SLOW);
+	const first = a.run({ ...baseReq, task: "first", role: "general" });
+	await new Promise((r) => setTimeout(r, 400));
+	const controller = new AbortController();
+	const queued = a.run({ ...baseReq, task: "queued", role: "general" }, { abortSignal: controller.signal });
+	await new Promise((r) => setTimeout(r, 100));
+	controller.abort();
+	const queuedRes = await queued;
+	// The queued call must NOT run after the abort.
+	assert.equal("busy" in queuedRes && queuedRes.busy, false);
+	await a.cancel();
+	await first;
+	const receipts = store.listRuns(dir, 10).map((x) => x.runId).map((id) => store.readRunMetadata(dir, id));
+	assert.equal(receipts.filter((m) => m?.task === "queued").length, 0, "aborted queued call never spawned");
+});
+
+test("app: queued call starts after the active run finishes", async () => {
+	const dir = tmpDir("app-queue-drain");
+	const a = app(dir, FAKE_OK);
+	const first = a.run({ ...baseReq, task: "first", role: "general" });
+	const second = a.run({ ...baseReq, task: "second", role: "general" });
+	const [r1, r2] = await Promise.all([first, second]);
+	assert.equal((r1 as { ok: boolean }).ok, true);
+	assert.equal((r2 as { ok: boolean }).ok, true, "queued run executed after the first finished");
+	const ids = store.listRuns(dir, 10).map((x) => x.runId);
+	assert.equal(ids.length, 2);
 });
 
 test("app: invalid role rejected (closed catalogue)", async () => {

@@ -118,6 +118,17 @@ Consequences worth internalizing:
   than blamed on the provider, and the stderr tail is no longer presented as
   the cause.
 
+### Concurrent calls queue (fan-out just works)
+
+Models naturally issue several `delegate` calls in one turn. Pi executes
+them truly in parallel; delegate runs **one child at a time** and places
+concurrent calls in a bounded FIFO queue (`queueLimit`, default 3): a 4-way
+fan-out becomes 4 back-to-back children and 4 real results — no error
+storm. Aborting a still-queued call removes it (resolved as `cancelled`,
+never spawned). Beyond the limit the call fails fast with an instructive
+`E_DELEGATE_BUSY` ("wait for the in-flight results, then re-issue").
+`/delegate status` shows the queue depth.
+
 ### Watching a child work: the live feed and `/delegate peek`
 
 - **Foreground `/delegate run` (TUI)** opens a live feed panel: identity

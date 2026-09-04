@@ -20,6 +20,8 @@ export interface DelegateConfigV1 {
 	handoffGraceMs: number;
 	/** Bounded wait for the mandatory-handoff enforcement answer (default 60 s). */
 	handoffEnforceTimeoutMs: number;
+	/** Concurrent calls beyond the active child wait in this FIFO queue. */
+	queueLimit: number;
 	/** R1: watchdog budget while a tool call is in flight (default: hard). */
 	stuckToolTimeoutMs?: number;
 	maxRuns: number;
@@ -37,6 +39,7 @@ export const DEFAULT_DELEGATE_CONFIG: DelegateConfigV1 = {
 	killGraceMs: 5_000,
 	handoffGraceMs: 90_000,
 	handoffEnforceTimeoutMs: 60_000,
+	queueLimit: 3,
 	stuckToolTimeoutMs: undefined,
 	maxRuns: 50,
 	maxRunAgeDays: 30,
@@ -51,6 +54,7 @@ const MIN_VALUES: Partial<Record<keyof DelegateConfigV1, number>> = {
 	killGraceMs: 100,
 	handoffGraceMs: 1_000,
 	handoffEnforceTimeoutMs: 1_000,
+	queueLimit: 0,
 	stuckToolTimeoutMs: 1_000,
 	maxRuns: 1,
 	maxRunAgeDays: 1,
@@ -65,6 +69,7 @@ const MAX_VALUES: Partial<Record<keyof DelegateConfigV1, number>> = {
 	killGraceMs: 60_000,
 	handoffGraceMs: 600_000,
 	handoffEnforceTimeoutMs: 600_000,
+	queueLimit: 20,
 	stuckToolTimeoutMs: 604_800_000,
 	maxRuns: 10_000,
 	maxRunAgeDays: 3650,

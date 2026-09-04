@@ -303,6 +303,16 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		if (!res.ok) {
 			const parts = [head];
 			const err = res.error ? `${res.error.code}: ${res.error.message}` : "unknown failure";
+			if (d.state === "cancelled") {
+				// A cancellation is user intent, not a failure — neutral line,
+				// plus the resume path when a durable session exists.
+				parts.push(`cancelled — ${res.error?.message ?? "aborted"}; no handoff.`);
+				if (d.sessionPath) parts.push(`resume: re-issue with resumeFrom: ${d.runId} to continue in the same child context.`);
+				if (res.details.partialHandoff) parts.push("", "partial handoff (captured at kill):", res.details.partialHandoff);
+				if (res.modelNote) parts.push(`note: ${res.modelNote}`);
+				parts.push(`transcript: ${d.transcriptPath}`);
+				return parts.join("\n");
+			}
 			parts.push(`error: ${err}`);
 			// R2: the killed child's own account of its partial work.
 			if (res.details.partialHandoff) {
@@ -369,6 +379,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			"Use delegate autonomously when a bounded subtask would consume substantial parent context, benefits from a specialist tool ceiling, or needs independent verification.",
 			"Pass the objective, relevant paths, constraints, and acceptance criteria in the delegate task text; the child cannot see parent history.",
 			"Do not use delegate for trivial one-step work, or when most of the parent history would have to be copied into the task.",
+			"Parallel delegate calls are fine: they queue and run back-to-back (one child at a time) — every call gets a real result; do not re-issue on 'queue full', wait for the in-flight results instead.",
 			"A timed-out run leaves a partialHandoff, a git checkpoint and a resumable child session: pass resumeFrom: <runId> to continue in the same context instead of re-explaining, and inspect the receipt's gitDelta before repairing anything.",
 			"Pin model: 'provider/model-id' when the child must not silently follow the parent's current model (e.g. after a mid-session model fallback).",
 			"For long validation/benchmark subtasks set timeout to at least 2x the longest expected single tool call.",
@@ -602,6 +613,8 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		const lines = ["[delegate]", `version: v${delegateVersion()} (loaded at session start; /reload picks up newer installs)`, `mode: ${s.modeEnabled ? "strict" : "normal"}`];
 		lines.push(`parent tools: ${s.modeEnabled ? "delegate only" : "normal active set"}`);
 		lines.push(`active run: ${s.activeRun ? `${s.activeRun.runId} (${s.activeRun.role})` : "none"}`);
+		const queued = app.queuedRunCount();
+		lines.push(`queue: ${queued} waiting (concurrent calls serialize; limit ${app.queueLimit()})`);
 		if (s.lastRun) {
 			const dur = s.lastRun.durationMs != null ? `${Math.round(s.lastRun.durationMs / 1000)}s` : "";
 			lines.push(`last run: ${s.lastRun.runId} ${s.lastRun.role} ${s.lastRun.state} ${dur}`.trimEnd());

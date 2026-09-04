@@ -64,6 +64,18 @@ interface ActiveRunReservation {
 	startedAt: string;
 }
 
+/**
+ * A concurrent delegate call waiting for the single child slot. Pi executes
+ * parallel tool calls truly in parallel and models routinely fan out — the
+ * queue serializes those calls on the one-child policy instead of failing
+ * them: a 4-way fan-out becomes 4 back-to-back children and 4 real results.
+ */
+interface QueuedRun {
+	request: DelegateRequest;
+	hooks: RunHooks;
+	resolve: (result: RunAttemptResult) => void;
+}
+
 function errorResult(
 	runId: string,
 	role: RoleName,
@@ -98,6 +110,7 @@ function errorResult(
 
 export class DelegateApplicationImpl implements DelegateApplication {
 	private activeRun: ActiveRunReservation | null = null;
+	private runQueue: QueuedRun[] = [];
 	private readonly modeRuntime: ModeRuntime;
 	private readonly ports: DelegateApplicationPorts;
 	private liveConfig: DelegateConfigV1;
@@ -183,24 +196,57 @@ export class DelegateApplicationImpl implements DelegateApplication {
 	}
 
 	/**
-	 * Canonical run entry point shared by tool and command. Reservation is
-	 * synchronous before the first await (POL-005).
+	 * Canonical entry point shared by tool and command. ONE child executes at
+	 * a time (POL-005): concurrent calls queue (bounded by `queueLimit`) and
+	 * run back-to-back — models fan out, and the queue turns that into
+	 * serialized results instead of an error storm.
 	 */
 	async run(request: DelegateRequest, hooks: RunHooks = {}): Promise<RunAttemptResult> {
-		// 1. Synchronous reservation BEFORE any await.
 		if (this.activeRun) {
-			return {
-				ok: false,
-				busy: true,
-				runId: this.activeRun.id,
-				role: this.activeRun.role,
-				message: `Delegation is busy with run ${this.activeRun.id} (${this.activeRun.role}).`,
-				error: {
-					code: "E_DELEGATE_BUSY",
-					message: `Active run ${this.activeRun.id} (${this.activeRun.role}). Inspect, cancel, or wait.`,
-				},
-			};
+			if (this.runQueue.length >= this.liveConfig.queueLimit) {
+				return {
+					ok: false,
+					busy: true,
+					runId: this.activeRun.id,
+					role: this.activeRun.role,
+					message: `Delegation queue is full (${this.runQueue.length} waiting) while run ${this.activeRun.id} (${this.activeRun.role}) executes.`,
+					error: {
+						code: "E_DELEGATE_BUSY",
+						message: `Queue full (${this.runQueue.length} waiting; limit ${this.liveConfig.queueLimit}); active run ${this.activeRun.id} (${this.activeRun.role}). Wait for the in-flight results, then re-issue.`,
+					},
+				};
+			}
+			return await new Promise<RunAttemptResult>((resolve) => {
+				const entry: QueuedRun = { request, hooks, resolve };
+				// Aborting a STILL-QUEUED call removes it (the runner wires
+				// the signal only once spawned); once started, the runner
+				// owns cancellation through the same signal.
+				const onAbort = () => {
+					const idx = this.runQueue.indexOf(entry);
+					if (idx >= 0) {
+						this.runQueue.splice(idx, 1);
+						resolve(
+							errorResult("", request.role, "E_CANCELLED", "aborted before start (queued call cancelled)", {
+								state: "cancelled",
+							}),
+						);
+					}
+				};
+				if (hooks.abortSignal) {
+					if (hooks.abortSignal.aborted) {
+						onAbort();
+						return;
+					}
+					hooks.abortSignal.addEventListener("abort", onAbort, { once: true });
+				}
+				this.runQueue.push(entry);
+			});
 		}
+		return await this.startRun(request, hooks);
+	}
+
+	/** Execute one run in the free slot (reservation stays synchronous). */
+	private async startRun(request: DelegateRequest, hooks: RunHooks = {}): Promise<RunAttemptResult> {
 
 		const agentDir = this.ports.agentDir;
 		// Config cascade: project .pi/delegate/config.json overlays the
@@ -346,7 +392,27 @@ export class DelegateApplicationImpl implements DelegateApplication {
 		} catch (error) {
 			this.activeRun = null;
 			return errorResult(opened.metadata.runId, role.name, "E_CHILD_EXIT", `Delegation failed unexpectedly: ${(error as Error).message}`);
+		} finally {
+			this.startNextQueuedRun();
 		}
+	}
+
+	/** Queued-call introspection for status views. */
+	queuedRunCount(): number {
+		return this.runQueue.length;
+	}
+
+	queueLimit(): number {
+		return this.liveConfig.queueLimit;
+	}
+
+	/** Pop the next queued run (if any) into the free slot, fire-and-forget. */
+	private startNextQueuedRun(): void {
+		const next = this.runQueue.shift();
+		if (!next) return;
+		void this.startRun(next.request, next.hooks).then(next.resolve, (error: unknown) => {
+			next.resolve(errorResult("", next.request.role, "E_CHILD_EXIT", `Delegation failed unexpectedly: ${(error as Error).message}`));
+		});
 	}
 
 	/** Cancel the active run (default) or an exact run ID. */
