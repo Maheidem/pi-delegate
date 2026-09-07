@@ -38,7 +38,8 @@ import type {
 	RunStreamUpdate,
 	SessionEntryLike,
 } from "./types.ts";
-import { SettingsPanel, type PanelSnapshot, type PanelActionResult } from "./ui/settings-panel.ts";
+import { SettingsPanel, type PanelSnapshot, type PanelActionResult, type PanelSection, type PanelRow } from "./ui/settings-panel.ts";
+import { shortModel, formatTokens, formatCost, stateGlyph, progressBar } from "./ui/format.ts";
 import { RunningView, type RunningViewState } from "./ui/running-view.ts";
 import { PeekView } from "./ui/peek-view.ts";
 import { FeedRing, feedEventsFromTranscript, renderFeedEvents } from "./transcript-feed.ts";
@@ -741,63 +742,10 @@ export default function delegateExtension(pi: ExtensionAPI) {
 						say(ctx, "[delegate] no runs to peek at.", "warning");
 						return;
 					}
-					let meta;
-					try {
-						meta = app.inspect(id).metadata;
-					} catch {
-						say(ctx, `[delegate] unknown run '${id}'.`, "error");
-						return;
-					}
-					if (!fsSync.existsSync(meta.transcriptPath)) {
-						say(ctx, `[delegate] no transcript captured for ${id}.`, "warning");
-						return;
-					}
-					if (ctx.mode === "tui") {
-						await ctx.ui.custom<{ closed?: boolean } | undefined>((tui, theme, keybindings, done) => {
-							const state = () => {
-								let live = false;
-								try {
-									live = !["succeeded", "failed", "cancelled", "timed_out_idle", "timed_out_hard", "crashed"].includes(app.inspect(id).metadata.state);
-								} catch {
-									live = false;
-								}
-								const { startMs, events } = feedEventsFromTranscript(meta.transcriptPath, { maxEvents: 400 });
-								return {
-									title: `${id.slice(-16)} · ${meta.role}${meta.model ? ` · ${meta.model}` : ""} · ${meta.state}`,
-									summary: meta.transcriptPath,
-									lines: renderFeedEvents(events, { startMs: startMs || Date.now(), maxChars: 150 }),
-									live,
-								};
-							};
-							// Live-follow refresh timer; cleared the moment the
-							// overlay closes (done wrapper) — never leaks.
-							let timer: ReturnType<typeof setInterval> | undefined;
-							const wrappedDone = (result: { closed?: boolean }) => {
-								if (timer) clearInterval(timer);
-								done(result);
-							};
-							const view = new PeekView({ theme, keybindings, state, done: wrappedDone });
-							timer = setInterval(() => tui.requestRender(), 1000);
-							return view;
-						}, {
-							overlay: true,
-							overlayOptions: {
-								width: "92%",
-								minWidth: 60,
-								maxHeight: "80%",
-								anchor: "center",
-							},
-						});
-					} else {
-						const { startMs, events } = feedEventsFromTranscript(meta.transcriptPath, { maxEvents: 400 });
-						const lines = renderFeedEvents(events, { startMs: startMs || Date.now(), maxChars: 200 });
-						say(
-							ctx,
-							`[delegate peek ${id} · ${meta.role} · ${meta.state}]\n${meta.transcriptPath}\n${lines.slice(-40).join("\n")}`,
-						);
-					}
+					await openPeek(ctx, id);
 					return;
 				}
+
 				case "resume": {
 					const runId = intent.runId?.trim();
 					if (!runId || !intent.task) {
@@ -824,72 +772,192 @@ export default function delegateExtension(pi: ExtensionAPI) {
 
 	// ── Dashboard (§12.2) ───────────────────────────────────────────────────
 
+	// ── 5b. Unified peek (shared by slash `peek` + dashboard `peek`) ────────
+
+	const openPeek = async (ctx: ExtensionCommandContext, runId?: string): Promise<void> => {
+		const id = runId?.trim() || app.mostRecentRunId();
+		if (!id) {
+			say(ctx, "[delegate] no runs to peek at.", "warning");
+			return;
+		}
+		let meta;
+		try {
+			meta = app.inspect(id).metadata;
+		} catch {
+			say(ctx, `[delegate] unknown run '${id}'.`, "error");
+			return;
+		}
+		if (!fsSync.existsSync(meta.transcriptPath)) {
+			say(ctx, `[delegate] no transcript captured for ${id}.`, "warning");
+			return;
+		}
+		if (ctx.mode === "tui") {
+			await ctx.ui.custom<{ closed?: boolean } | undefined>((tui, theme, keybindings, done) => {
+				const state = () => {
+					let live = false;
+					try {
+						live = !["succeeded", "failed", "cancelled", "timed_out_idle", "timed_out_hard", "crashed"].includes(app.inspect(id).metadata.state);
+					} catch {
+						live = false;
+					}
+					const { startMs, events } = feedEventsFromTranscript(meta.transcriptPath, { maxEvents: 400 });
+					return {
+						title: `${id.slice(-16)} · ${meta.role}${meta.model ? ` · ${shortModel(meta.model)}` : ""} · ${meta.state}`,
+						summary: meta.transcriptPath,
+						lines: renderFeedEvents(events, { startMs: startMs || Date.now(), maxChars: 150 }),
+						live,
+					};
+				};
+				// Live-follow refresh timer; cleared the moment the overlay
+				// closes (done wrapper) — never leaks past `q`/esc.
+				let timer: ReturnType<typeof setInterval> | undefined;
+				const wrappedDone = (result: { closed?: boolean }) => {
+					if (timer) clearInterval(timer);
+					done(result);
+				};
+				const view = new PeekView({ theme, keybindings, state, done: wrappedDone });
+				timer = setInterval(() => tui.requestRender(), 1000);
+				return view;
+			}, {
+				overlay: true,
+				overlayOptions: { width: "92%", minWidth: 60, maxHeight: "80%", anchor: "center" },
+			});
+		} else {
+			const { startMs, events } = feedEventsFromTranscript(meta.transcriptPath, { maxEvents: 400 });
+			const lines = renderFeedEvents(events, { startMs: startMs || Date.now(), maxChars: 200 });
+			say(ctx, `[delegate peek ${id} · ${meta.role} · ${meta.state}]\n${meta.transcriptPath}\n${lines.slice(-40).join("\n")}`);
+		}
+	};
+
+	// ── 5c. Advanced configuration (secondary screen, opened from home) ──────
+
+	const openAdvanced = async (ctx: ExtensionCommandContext, projectRoot: string): Promise<void> => {
+		const buildRows = (): PanelRow[] => {
+			const c = app.panelConfig();
+			return [
+				{ key: "cfg:user:queueLimit", label: "Queue limit", value: String(c.queueLimit), rawValue: String(c.queueLimit), kind: "input", inputHint: "concurrent calls that wait (1–10)" },
+				{ key: "cfg:user:stuckToolTimeoutMs", label: "Stuck-tool watchdog", value: c.stuckToolTimeoutMs != null ? formatDuration(c.stuckToolTimeoutMs) : "hard (default)", rawValue: c.stuckToolTimeoutMs != null ? String(c.stuckToolTimeoutMs) : "", kind: "input", inputHint: "idle budget while a tool runs; leave hard blank to inherit" },
+				{ key: "cfg:user:killGraceMs", label: "Kill grace", value: formatDuration(c.killGraceMs), rawValue: String(c.killGraceMs), kind: "input", inputHint: "SIGTERM→SIGKILL grace" },
+				{ key: "cfg:user:handoffGraceMs", label: "Handoff grace", value: formatDuration(c.handoffGraceMs), rawValue: String(c.handoffGraceMs), kind: "input", inputHint: "wait for final handoff after a kill" },
+				{ key: "cfg:user:handoffEnforceTimeoutMs", label: "Handoff enforce", value: formatDuration(c.handoffEnforceTimeoutMs), rawValue: String(c.handoffEnforceTimeoutMs), kind: "input", inputHint: "re-prompt until a schema handoff lands" },
+				{ key: "cfg:user:maxTaskBytes", label: "Max task bytes", value: String(c.maxTaskBytes), rawValue: String(c.maxTaskBytes), kind: "input" },
+				{ key: "cfg:user:maxResultBytes", label: "Max result bytes", value: String(c.maxResultBytes), rawValue: String(c.maxResultBytes), kind: "input" },
+				{ key: "cfg:user:updateThrottleMs", label: "Update throttle", value: formatDuration(c.updateThrottleMs), rawValue: String(c.updateThrottleMs), kind: "input", inputHint: "live update cadence" },
+				{ key: "info:defaultRole", label: "Default role", value: c.defaultRole, kind: "info" },
+				{ key: "info:retention", label: "Retention", value: `${c.maxRuns} runs · ${c.maxRunAgeDays}d`, kind: "info" },
+			];
+		};
+		try {
+			await ctx.ui.custom(
+				(tui, theme, keybindings, done) =>
+					new SettingsPanel({
+						theme,
+						keybindings,
+						initialKey: "cfg:user:queueLimit",
+						snapshot: () => ({
+							title: "Advanced configuration",
+							summaryLines: ["User-wide · ~/.pi/agent/delegate/config.json", "Esc or any action returns to Delegation"],
+							sections: [{ title: "Knobs", rows: buildRows() }],
+						}),
+						apply: (key: string, raw: string): string | null => {
+							const m = /^cfg:user:([A-Za-z0-9]+)$/.exec(key);
+							if (!m) return `Unknown setting '${key}'.`;
+							return app.patchConfig(m[1]!, raw);
+						},
+						activate: (): PanelActionResult => ({ kind: "close", action: "advanced-done" }),
+						requestRender: () => tui.requestRender(),
+						done,
+					}),
+				{ onCancel: () => ({}) } as unknown as Record<string, never>,
+			);
+		} catch {
+			/* esc → back to home */
+		}
+	};
+
+	// ── 5d. Home dashboard snapshot (centralized live window) ───────────────
+
 	const dashboardSnapshot = (projectRoot?: string): PanelSnapshot => {
 		const s = app.getStatus(pi.getActiveTools(), projectRoot);
 		const active = s.activeRun;
 		const last = s.lastRun;
 		const t = s.timeouts;
+		const live = app.getActiveRunStream();
+		const queued = app.queuedRunCount();
+
+		const summaryLines: string[] = [];
+		summaryLines.push(`Delegate v${delegateVersion()} · mode ${s.modeEnabled ? "strict (delegate-only)" : "normal"}`);
+		if (active && live) {
+			const phaseState = live.update.phase.startsWith("tool:") ? "running" : live.update.phase;
+			const g = stateGlyph(phaseState);
+			summaryLines.push(`Active   ${shortModel(live.update.model) || live.update.role} ${g.glyph} ${Math.round(live.update.elapsedMs / 1000)}s / ${formatDuration(live.hardMs)}`);
+		} else if (active) {
+			summaryLines.push(`Active   ${active.role} · ${active.runId.slice(-12)} · starting`);
+		} else {
+			summaryLines.push(`Idle     no active run`);
+		}
+		if (queued > 0) summaryLines.push(`Queue    ${queued} waiting (limit ${app.queueLimit()})`);
+		if (last) {
+			const g = stateGlyph(last.state);
+			summaryLines.push(`Last     ${last.role} ${g.glyph} ${g.word}${last.durationMs != null ? ` in ${formatDuration(last.durationMs)}` : ""}`);
+		}
+
+		const sections: PanelSection[] = [];
+
+		if (live) {
+			const inflight = (live.update.openTools ?? []).slice(0, 3).join(", ");
+			const frac = live.hardMs ? Math.min(1, live.update.elapsedMs / live.hardMs) : 0;
+			const tail = renderFeedEvents([...live.events], { startMs: Date.now() - live.update.elapsedMs, maxChars: 96 }).slice(-3);
+			const rows: PanelRow[] = [
+				{ key: "live-phase", label: "Phase", value: `${live.update.phase}${live.update.model ? ` · ${shortModel(live.update.model)}` : ""}`, kind: "info", valueStyle: "accent" },
+				{ key: "live-progress", label: "Progress", value: progressBar(frac, 24), kind: "info" },
+				{ key: "live-tokens", label: "Tokens", value: `↑${formatTokens(live.update.usage?.input)} ↓${formatTokens(live.update.usage?.output)} · ${formatCost(live.update.usage?.cost)}`, kind: "info", valueStyle: "muted" },
+				{ key: "live-inflight", label: "In flight", value: inflight || "—", kind: "info" },
+			];
+			tail.forEach((line, i) => rows.push({ key: `live-tail-${i}`, label: "", value: line, kind: "info", valueStyle: "muted" }));
+			sections.push({ title: "Live", rows });
+		}
+
+		sections.push({
+			title: "Actions",
+			rows: [
+				{ key: "run-general", label: "Run general task…", value: "", kind: "action" },
+				{ key: "run-research", label: "Run research task…", value: "", kind: "action" },
+				{ key: "peek", label: "Peek live / final detail", value: "", kind: "action", disabled: !active && !last },
+				{ key: "cancel", label: "Cancel active run", value: "", kind: "action", disabled: !active },
+				{ key: "resume", label: "Resume last run…", value: "", kind: "action", disabled: !last },
+				{ key: "strict-toggle", label: s.modeEnabled ? "Disable strict mode" : "Enable strict mode", value: "", kind: "action" },
+				{ key: "configure-advanced", label: "Configure advanced…", value: "›", kind: "action" },
+				{ key: "doctor", label: "Doctor", value: "", kind: "action" },
+				{ key: "paths", label: "Paths", value: "", kind: "action" },
+			],
+		});
+
+		sections.push({
+			title: "Timeouts (base)",
+			rows: [
+				{ key: "cfg:user:hardTimeoutMs", label: "Hard · user-wide", value: formatDuration(t.userHardMs), rawValue: String(t.userHardMs), kind: "input", inputHint: "e.g. 30m / 2h / 1d — user config" },
+				{ key: "cfg:user:inactivityTimeoutMs", label: "Idle · user-wide", value: formatDuration(t.userInactivityMs), rawValue: String(t.userInactivityMs), kind: "input", inputHint: "no-output watchdog; capped at ½ hard" },
+				{ key: "cfg:project:hardTimeoutMs", label: "Hard · project", value: t.projectHardMs !== undefined ? formatDuration(t.projectHardMs) : "not set", rawValue: t.projectHardMs !== undefined ? String(t.projectHardMs) : "", kind: "input", inputHint: `merges into ${t.projectPath ?? ".pi/delegate/config.json"}` },
+				...(t.projectCorrupt
+					? [{ key: "project-corrupt", label: "Project config", value: "corrupt — user values used", kind: "info" as const, valueStyle: "warning" as const }]
+					: []),
+			],
+		});
+
 		return {
 			title: "Delegation",
-			summaryLines: [
-				`Parent mode      ${s.modeEnabled ? "strict" : "normal"}`,
-				`Parent tools     ${s.modeEnabled ? "delegate only" : "normal active set"}`,
-				`Active run       ${active ? `${active.runId.slice(0, 24)} (${active.role})` : "none"}`,
-				`Last run         ${last ? `${last.role} · ${last.state}${last.durationMs != null ? ` · ${Math.round(last.durationMs / 1000)}s` : ""}` : "none"}`,
-				`Default role     ${s.defaultRole}`,
-				`Base timeout     ${formatDuration(t.hardMs)} hard · ${formatDuration(t.inactivityMs)} idle (${t.source === "project" ? "project" : "user-wide"})`,
-			],
-			sections: [
-				{
-					title: "Actions",
-					rows: [
-						{ key: "run-general", label: "Run general", value: "", kind: "action" },
-						{ key: "run-research", label: "Run research", value: "", kind: "action" },
-						{ key: "strict-toggle", label: s.modeEnabled ? "Disable strict mode" : "Enable strict mode", value: "", kind: "action" },
-						{ key: "inspect-last", label: "Inspect last run", value: "", kind: "action", disabled: !last && !active },
-						{ key: "paths", label: "Paths / diagnostics", value: "", kind: "action" },
-						{ key: "doctor", label: "Doctor", value: "", kind: "action" },
-					],
-				},
-				{
-					title: "Timeouts (base)",
-					rows: [
-						{
-							key: "timeout-user",
-							label: "Hard · user-wide",
-							value: formatDuration(t.userHardMs),
-							rawValue: formatDuration(t.userHardMs),
-							kind: "input",
-							inputHint: "e.g. 30m / 2h / 1d — saves ~/.pi/agent/delegate/config.json",
-						},
-						{
-							key: "timeout-project",
-							label: "Hard · project",
-							value: t.projectHardMs !== undefined ? formatDuration(t.projectHardMs) : "not set",
-							rawValue: t.projectHardMs !== undefined ? formatDuration(t.projectHardMs) : "",
-							kind: "input",
-							inputHint: `merges into ${t.projectPath ?? ".pi/delegate/config.json"} (this key only)`,
-						},
-						{
-							key: "idle-user",
-							label: "Idle · user-wide",
-							value: formatDuration(t.userInactivityMs),
-							rawValue: formatDuration(t.userInactivityMs),
-							kind: "input",
-							inputHint: "no-output watchdog; capped at ½ of the hard timeout",
-						},
-						...(t.projectCorrupt
-							? [{ key: "project-corrupt", label: "Project config", value: "corrupt — user values used", kind: "info" as const, valueStyle: "warning" as const }]
-							: []),
-					],
-				},
-			],
-			detailLines: active ? [`elapsed updates refresh every 1s while a run is active`] : undefined,
+			summaryLines,
+			sections,
+			detailLines: active
+				? ["live refresh 1s · enter selects · peek / cancel in Actions"]
+				: ["enter selects · edit a timeout, or run a task"],
 		};
 	};
 
 	const openDashboard = async (ctx: ExtensionCommandContext): Promise<void> => {
-		let initialKey = app.isStrict() ? "strict-toggle" : "run-general";
+		const projectRoot = ctx.cwd ?? process.cwd();
+		let initialKey = app.isStrict() ? "run-general" : "run-general";
 		for (;;) {
 			let refreshTimer: ReturnType<typeof setInterval> | undefined;
 			let result: { action?: string } | undefined;
@@ -900,18 +968,14 @@ export default function delegateExtension(pi: ExtensionAPI) {
 							theme,
 							keybindings,
 							initialKey,
-							snapshot: () => dashboardSnapshot(ctx.cwd ?? process.cwd()),
+							snapshot: () => dashboardSnapshot(projectRoot),
 							apply: (key: string, raw: string): string | null => {
-								switch (key) {
-									case "timeout-user":
-										return app.patchConfig("hardTimeoutMs", raw);
-									case "idle-user":
-										return app.patchConfig("inactivityTimeoutMs", raw);
-									case "timeout-project":
-										return app.patchProjectConfig(ctx.cwd ?? process.cwd(), "hardTimeoutMs", raw);
-									default:
-										return `Unknown setting '${key}'.`;
-								}
+								const m = /^cfg:(user|project):([A-Za-z0-9]+)$/.exec(key);
+								if (!m) return `Unknown setting '${key}'.`;
+								const [, target, field] = m;
+								return target === "project"
+									? app.patchProjectConfig(projectRoot, field, raw)
+									: app.patchConfig(field, raw);
 							},
 							activate: (key): PanelActionResult => ({ kind: "close", action: key }),
 							requestRender: () => tui.requestRender(),
@@ -942,18 +1006,40 @@ export default function delegateExtension(pi: ExtensionAPI) {
 				await runCommandForeground(task, role, ctx);
 				continue;
 			}
-			if (action === "strict-toggle") {
-				if (app.isStrict()) {
-					const res = await app.disableStrict(modeCtx(ctx));
-					say(ctx, `[delegate] ${res.message}`, res.ok ? "info" : "warning");
-				} else {
-					const res = await app.enableStrict(modeCtx(ctx));
+			if (action === "peek") {
+				await openPeek(ctx);
+				continue;
+			}
+			if (action === "cancel") {
+				const ok = await ctx.ui.confirm("Cancel active run?", "SIGTERM then SIGKILL; a partial handoff is returned if the child produced one.");
+				if (ok) {
+					const res = await app.cancel();
 					say(ctx, `[delegate] ${res.message}`, res.ok ? "info" : "warning");
 				}
 				continue;
 			}
-			if (action === "inspect-last") {
-				say(ctx, inspectText());
+			if (action === "resume") {
+				const target = app.getStatus(pi.getActiveTools(), projectRoot).lastRun;
+				if (!target) {
+					say(ctx, "[delegate] nothing to resume.", "warning");
+					continue;
+				}
+				const task = await ctx.ui.editor(`Resume ${target.runId.slice(-12)} (${target.role})`, "");
+				if (!task || !task.trim()) continue;
+				await runCommandForeground(task, target.role === "research" ? "research" : "general", ctx, undefined, { resumeFrom: target.runId });
+				continue;
+			}
+			if (action === "strict-toggle") {
+				const res = app.isStrict() ? await app.disableStrict(modeCtx(ctx)) : await app.enableStrict(modeCtx(ctx));
+				say(ctx, `[delegate] ${res.message}`, res.ok ? "info" : "warning");
+				continue;
+			}
+			if (action === "configure-advanced") {
+				await openAdvanced(ctx, projectRoot);
+				continue;
+			}
+			if (action === "doctor") {
+				say(ctx, doctorText());
 				continue;
 			}
 			if (action === "paths") {
@@ -961,8 +1047,8 @@ export default function delegateExtension(pi: ExtensionAPI) {
 				say(ctx, [`[delegate paths]`, `config: ${p.configPath}`, `runs:   ${p.runsDir}`].join("\n"));
 				continue;
 			}
-			if (action === "doctor") {
-				say(ctx, doctorText());
+			if (action === "inspect-last") {
+				say(ctx, inspectText());
 				continue;
 			}
 			return;

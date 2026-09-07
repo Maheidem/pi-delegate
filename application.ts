@@ -30,9 +30,11 @@ import type {
 	RunInspection,
 	RunMetadataV1,
 	RunnerOutcome,
+	RunStreamUpdate,
 	TranscriptRecordV1,
 	SessionEntryLike,
 } from "./types.ts";
+import { FeedRing, type FeedEvent } from "./transcript-feed.ts";
 import { decodeTranscriptRecord } from "./types.ts";
 import { applyProjectOverlay, clampConfigField, formatDuration, normalizeConfig, parseDuration, projectConfigPath, resolveRunTimeouts, saveConfig, saveProjectConfig, type DelegateConfigV1 } from "./config.ts";
 import { EMPTY_USAGE } from "./types.ts";
@@ -62,6 +64,8 @@ interface ActiveRunReservation {
 	role: RoleName;
 	runner: DelegateRunner;
 	startedAt: string;
+	/** Effective hard cap for the live progress bar (§ S2). */
+	hardMs: number;
 }
 
 /**
@@ -110,6 +114,9 @@ function errorResult(
 
 export class DelegateApplicationImpl implements DelegateApplication {
 	private activeRun: ActiveRunReservation | null = null;
+	/** Live state of the active run, captured for the home dashboard (§ S2). */
+	private activeStream: RunStreamUpdate | null = null;
+	private activeRing: FeedRing = new FeedRing(120);
 	private runQueue: QueuedRun[] = [];
 	private readonly modeRuntime: ModeRuntime;
 	private readonly ports: DelegateApplicationPorts;
@@ -193,6 +200,31 @@ export class DelegateApplicationImpl implements DelegateApplication {
 	getActiveRun(): { runId: string; role: RoleName; startedAt: string } | null {
 		if (!this.activeRun) return null;
 		return { runId: this.activeRun.id, role: this.activeRun.role, startedAt: this.activeRun.startedAt };
+	}
+
+	/** Live state of the active run (identity update + feed events + queue),
+	 * for the home dashboard's Live block. Null when nothing is running. */
+	getActiveRunStream(): { update: RunStreamUpdate; events: readonly FeedEvent[]; queue: number; hardMs: number } | null {
+		if (!this.activeRun || !this.activeStream) return null;
+		return { update: this.activeStream, events: this.activeRing.all(), queue: this.runQueue.length, hardMs: this.activeRun.hardMs };
+	}
+
+	/** Advanced knobs for the dashboard's Configure-advanced screen (§ S7). */
+	panelConfig(): Pick<DelegateConfigV1, "queueLimit" | "killGraceMs" | "handoffGraceMs" | "handoffEnforceTimeoutMs" | "stuckToolTimeoutMs" | "maxTaskBytes" | "maxResultBytes" | "updateThrottleMs" | "defaultRole" | "maxRuns" | "maxRunAgeDays"> {
+		const c = this.liveConfig;
+		return {
+			queueLimit: c.queueLimit,
+			killGraceMs: c.killGraceMs,
+			handoffGraceMs: c.handoffGraceMs,
+			handoffEnforceTimeoutMs: c.handoffEnforceTimeoutMs,
+			stuckToolTimeoutMs: c.stuckToolTimeoutMs,
+			maxTaskBytes: c.maxTaskBytes,
+			maxResultBytes: c.maxResultBytes,
+			updateThrottleMs: c.updateThrottleMs,
+			defaultRole: c.defaultRole,
+			maxRuns: c.maxRuns,
+			maxRunAgeDays: c.maxRunAgeDays,
+		};
 	}
 
 	/**
@@ -351,6 +383,20 @@ export class DelegateApplicationImpl implements DelegateApplication {
 		}
 
 		// 8. Reservation NOW covers the child lifecycle.
+		// Capture live state for the home dashboard while forwarding the caller's hooks.
+		this.activeStream = null;
+		this.activeRing = new FeedRing(120);
+		const captureHooks: RunHooks = {
+			...hooks,
+			onUpdate: (u: RunStreamUpdate) => {
+				this.activeStream = u;
+				hooks.onUpdate?.(u);
+			},
+			onEvent: (e: FeedEvent) => {
+				this.activeRing.push(e);
+				hooks.onEvent?.(e);
+			},
+		};
 		const runner = new DelegateRunner(
 			opened,
 			{
@@ -368,7 +414,7 @@ export class DelegateApplicationImpl implements DelegateApplication {
 				...(sessionDir ? { sessionDir } : {}),
 			},
 			cfg,
-			hooks,
+			captureHooks,
 			this.ports.resolveInvocation ?? resolvePiInvocation,
 		);
 		const reservation: ActiveRunReservation = {
@@ -376,6 +422,7 @@ export class DelegateApplicationImpl implements DelegateApplication {
 			role: role.name,
 			runner,
 			startedAt: opened.metadata.createdAt,
+			hardMs: timeouts.hardMs,
 		};
 		this.activeRun = reservation;
 
