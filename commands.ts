@@ -43,7 +43,7 @@ export const DELEGATE_USAGE = [
 	"/delegate help                      this help",
 ].join("\n");
 
-const RESERVED_FIRST_TOKENS = new Set([
+export const RESERVED_FIRST_TOKENS = new Set([
 	"on",
 	"off",
 	"status",
@@ -163,8 +163,8 @@ export function delegateCompletions(prefix: string, recentRunIds: string[] = [])
 			if (id.startsWith(p)) matches.push(`${id} `);
 		}
 	}
-	// De-duplicate, keep order, cap for the TUI.
-	return [...new Set(matches)].slice(0, 10);
+	// De-duplicate, keep order, cap for the TUI (all primary verbs fit).
+	return [...new Set(matches)].slice(0, 14);
 }
 
 /**
