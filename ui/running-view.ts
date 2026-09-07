@@ -16,6 +16,7 @@
 
 import { truncateToWidth, visibleWidth, matchesKey, type Component } from "@earendil-works/pi-tui";
 import type { Theme, KeybindingsManager, ThemeColor } from "@earendil-works/pi-coding-agent";
+import { formatDuration, formatTokens, shortModel } from "./format.ts";
 
 export interface RunningViewState {
 	runId: string;
@@ -46,19 +47,6 @@ export interface RunningViewHost {
 const PANEL_ROWS = 9;
 /** Feed rows inside the fixed frame; the rest are the fixed scaffold. */
 const FEED_ROWS = PANEL_ROWS - 5;
-
-function fmtDuration(ms: number): string {
-	const s = Math.max(0, Math.round(ms / 1000));
-	if (s < 60) return `${s}s`;
-	return `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
-}
-
-function fmtTokens(n?: number): string {
-	if (!n) return "0";
-	if (n < 1000) return String(n);
-	if (n < 1_000_000) return `${Math.round(n / 100) / 10}k`;
-	return `${Math.round(n / 100_000) / 10}M`;
-}
 
 export class RunningView implements Component {
 	private readonly host: RunningViewHost;
@@ -110,10 +98,10 @@ export class RunningView implements Component {
 		// Fixed scaffold rows — always exactly PANEL_ROWS - 2 inner rows.
 		const head = [
 			s.role,
-			s.model,
-			fmtDuration(s.elapsedMs),
+			s.model ? shortModel(s.model) : undefined,
+			formatDuration(s.elapsedMs),
 			...(s.turns !== undefined ? [`turn ${s.turns}`] : []),
-			...(s.tokens ? [`↑${fmtTokens(s.tokens.input)} ↓${fmtTokens(s.tokens.output)}`] : []),
+			...(s.tokens ? [`↑${formatTokens(s.tokens.input)} ↓${formatTokens(s.tokens.output)}`] : []),
 		]
 			.filter(Boolean)
 			.join(" · ");
@@ -123,7 +111,7 @@ export class RunningView implements Component {
 			const frac = Math.min(1, s.elapsedMs / s.hardMs);
 			const barWidth = Math.max(4, Math.min(inner - 14, 24));
 			const filled = Math.round(frac * barWidth);
-			progress = `${"█".repeat(filled)}${"░".repeat(Math.max(0, barWidth - filled))} ${Math.round(frac * 100)}% of ${fmtDuration(s.hardMs)} hard`;
+			progress = `${"█".repeat(filled)}${"░".repeat(Math.max(0, barWidth - filled))} ${Math.round(frac * 100)}% of ${formatDuration(s.hardMs)} hard`;
 		}
 
 		const openTools = s.openTools ?? [];

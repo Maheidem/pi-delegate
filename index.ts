@@ -409,9 +409,10 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			const hooks = {
 				abortSignal: signal ?? undefined,
 				onUpdate: (u: RunStreamUpdate) => {
-					const modelBit = u.model ? ` · ${u.model}` : "";
+					const head = `[delegate v${delegateVersion()} ${shortModel(u.model) || u.role} · ${u.phase} · ${Math.round(u.elapsedMs / 1000)}s]`;
+					const tail = (u.lastActions ?? []).slice(-2).map((l) => `  ${l}`);
 					onUpdate?.({
-						content: [{ type: "text", text: `[delegate v${delegateVersion()} ${u.runId} · ${u.role}${modelBit} · ${u.phase} · ${Math.round(u.elapsedMs / 1000)}s]` }],
+						content: [{ type: "text", text: tail.length ? `${head}\n${tail.join("\n")}` : head }],
 						details: { runId: u.runId, phase: u.phase },
 					});
 				},
@@ -436,7 +437,8 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		renderCall(args: any, theme: any) {
 			const role = typeof args.role === "string" ? args.role : config.defaultRole;
 			const task = typeof args.task === "string" ? args.task : "";
-			const text = `delegate(${role}): ${task.length > 70 ? `${task.slice(0, 67)}…` : task}`;
+			const modelBit = typeof args.model === "string" && args.model ? ` · ${shortModel(args.model)}` : "";
+			const text = `→ delegate · ${role}${modelBit}: ${task.length > 64 ? `${task.slice(0, 61)}…` : task}`;
 			return new Text(theme?.fg ? theme.fg("accent", text) : text, 0, 0);
 		},
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -447,22 +449,31 @@ export default function delegateExtension(pi: ExtensionAPI) {
 				return new Text(text || "(no output)", 0, 0);
 			}
 			const fg = (kind: string, s: string) => (theme?.fg ? theme.fg(kind, s) : s);
-			const u = d.usage ?? {};
-			const bits: string[] = [`${d.role ?? "?"} · ${d.state ?? "?"}`];
-			if (u.input) bits.push(`↑${u.input}`);
-			if (u.output) bits.push(`↓${u.output}`);
-			if (u.cost) bits.push(`$${u.cost.toFixed(4)}`);
-			const header = `→ ${d.runId}`;
+			const u = d.usage ?? ({} as DelegateDetails["usage"]);
+			// Neutral, non-color-alone state word (cancelled ≠ failed ≠ timeout).
+			const g = stateGlyph(d.state);
+			const bits: string[] = [`${d.role} ${g.glyph} ${g.word}`, `${Math.round(d.durationMs / 1000)}s`];
+			if (d.model) bits.push(shortModel(d.model));
+			bits.push(`↑${formatTokens(u.input)} ↓${formatTokens(u.output)}`);
+			if (u.cost) bits.push(formatCost(u.cost));
+			const header = `→ ${d.runId.slice(-16)}`;
+			const color = g.color;
 			if (!options?.expanded) {
-				const body = bits.join(" ") + (d.outputTruncated && d.transcriptPath ? `\ntranscript: ${d.transcriptPath}` : "");
-				return new Text(`${fg("accent", header)}\n${body}`, 0, 0);
+				const lines = [fg("accent", header), fg(color, bits.join(" "))];
+				// Inline tail ≤5 — partial handoff (timeout/cancel) or reason, never bare.
+				const tailSrc: string = d.partialHandoff ?? (d.state === "succeeded" ? "" : (result.content ?? []).map((c: { text?: string }) => c.text ?? "").join(" ").split("\n")[0] ?? "");
+				const tail = tailSrc ? tailSrc.split("\n").map((l: string) => l.trim()).filter(Boolean).slice(0, 5) : [];
+				for (const t of tail) lines.push(fg("muted", `  ${t}`));
+				if (d.outputTruncated && d.transcriptPath) lines.push(fg("muted", `  transcript: ${d.transcriptPath}`));
+				return new Text(lines.join("\n"), 0, 0);
 			}
-			// Expanded: compact summary — Outcome + key lines + last actions.
-			const res = result as unknown as DelegateRunResult;
-			const summary = formatRunSummary(res);
-			const stateColor = d.state === "succeeded" ? "success" : d.state === "cancelled" ? "muted" : "warning";
-			const body = bits.join(" ") + (summary ? `\n${summary}` : "");
-			return new Text(`${fg("accent", header)}\n${fg(stateColor, body)}`, 0, 0);
+			// Expanded: identity + canonical summary + resume hint.
+			const summary = formatRunSummary(result as unknown as DelegateRunResult);
+			const lines = [fg("accent", header), fg(color, bits.join(" "))];
+			if (summary) for (const l of summary.split("\n")) lines.push(l);
+			if (d.sessionPath && d.state !== "succeeded") lines.push(fg("muted", `  resume: resumeFrom ${d.runId}`));
+			if (d.transcriptPath) lines.push(fg("muted", `  transcript: ${d.transcriptPath}`));
+			return new Text(lines.join("\n"), 0, 0);
 		},
 	});
 

@@ -64,7 +64,7 @@ test("ui: RunningView renders width-safe at 80/62/20/1", () => {
 	// At full width the feed is visible: identity, budgets, events.
 	const lines80 = new RunningView({ theme, keybindings, state: runningState, done: () => {} }).render(80);
 	const all80 = lines80.map(strip).join("\n");
-	assert.ok(all80.includes("zai/glm-5.3"), "model echoed");
+	assert.ok(all80.includes("glm-5.3") && !all80.includes("zai/"), "model echoed (shortModel, provider prefix stripped)");
 	assert.ok(all80.includes("turn 7"), "turn count echoed");
 	assert.ok(all80.includes("npm test"), "feed events rendered");
 	assert.ok(/% of 30m/.test(all80), "hard-cap progress rendered");
