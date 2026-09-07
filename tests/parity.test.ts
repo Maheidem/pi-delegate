@@ -64,3 +64,13 @@ test("parity: role completion under `run`", () => {
 	const done = delegateCompletions("run ").join(" ");
 	assert.ok(done.includes("general") && done.includes("research"), "run <role> completes roles");
 });
+
+test("completions: nested run-id under peek/cancel/resume/inspect (S11)", () => {
+	const ids = ["run-abcdef0123", "run-9988776655"];
+	for (const verb of ["peek", "cancel", "resume", "inspect"]) {
+		const done = delegateCompletions(`${verb} `, ids).join(" ");
+		assert.ok(done.includes("run-abcdef0123") && done.includes("run-9988776655"), `${verb} <run-id> completes recent runs`);
+	}
+	// prefix filtering
+	assert.ok(delegateCompletions("peek run-ab", ids).join(" ").includes("run-abcdef0123"), "run-id prefix filters");
+});
