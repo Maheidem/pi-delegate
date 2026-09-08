@@ -289,10 +289,12 @@ export class DelegateApplicationImpl implements DelegateApplication {
 			// Strip the overlay's diagnostic keys so only real config fields
 			// reach the runner (a spurious key would survive into metadata).
 			const overlay = applyProjectOverlay(this.liveConfig, request.projectRoot);
-			const { projectOverrides, projectCorrupt, ...rest } = overlay as unknown as DelegateConfigV1 & {
+			const { projectOverrides, projectSetKeys, projectCorrupt, ...rest } = overlay as unknown as DelegateConfigV1 & {
 				projectOverrides: string[];
+				projectSetKeys: string[];
 				projectCorrupt?: string;
 			};
+			void projectSetKeys; // display-only; run resolution uses projectOverrides
 			projectSetsHard = projectOverrides.includes("hardTimeoutMs");
 			baseCfg = { ...(rest as unknown as DelegateConfigV1) } as DelegateConfigV1;
 		}
@@ -529,20 +531,27 @@ export class DelegateApplicationImpl implements DelegateApplication {
 		if (projectRoot) {
 			const overlay = applyProjectOverlay(cfg, projectRoot) as unknown as DelegateConfigV1 & {
 				projectOverrides: string[];
+				projectSetKeys: string[];
 				projectCorrupt?: string;
 			};
-			const { projectOverrides, projectCorrupt, ...rest } = overlay;
+			const { projectOverrides, projectSetKeys, projectCorrupt, ...rest } = overlay;
 			const eff = rest as unknown as DelegateConfigV1;
+			// Provenance (source) keeps the override semantics: the effective value
+			// only comes "from the project" when it differs. Reporting does not:
+			// projectHardMs is present whenever the key is in the project FILE, so a
+			// project value equal to the user value is still visible to the panel.
 			const projectSetsHard = projectOverrides.includes("hardTimeoutMs");
+			const hardFromFile = projectSetKeys.includes("hardTimeoutMs");
 			timeouts = {
 				hardMs: eff.hardTimeoutMs,
 				inactivityMs: eff.inactivityTimeoutMs,
 				source: projectSetsHard ? "project" : "user",
 				userHardMs: cfg.hardTimeoutMs,
 				userInactivityMs: cfg.inactivityTimeoutMs,
-				...(projectSetsHard ? { projectHardMs: eff.hardTimeoutMs } : {}),
+				...(hardFromFile ? { projectHardMs: eff.hardTimeoutMs } : {}),
 				projectPath: projectConfigPath(projectRoot),
 				projectOverrides,
+				projectSetKeys,
 				...(projectCorrupt ? { projectCorrupt } : {}),
 			};
 		}

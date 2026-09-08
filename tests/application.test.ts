@@ -12,6 +12,7 @@ import * as store from "../run-store.ts";
 
 import { DelegateApplicationImpl } from "../application.ts";
 import { loadConfig, DEFAULT_DELEGATE_CONFIG } from "../config.ts";
+import { projectValueCell } from "../ui/format.ts";
 import type { DelegateAppConfig } from "../types.ts";
 
 function tmpDir(prefix: string): string {
@@ -348,4 +349,51 @@ test("app: patchProjectConfig writes overlay; status reflects project source", a
 	const s2 = a.getStatus(["read"], proj);
 	assert.equal(s2.timeouts.source, "user");
 	assert.ok(s2.timeouts.projectCorrupt);
+});
+
+/**
+ * Regression: a project file that sets hardTimeoutMs to a value EQUAL to the
+ * user layer used to render as "not set" — applyProjectOverlay only recorded
+ * keys that CHANGED the effective value, and getStatus reported projectHardMs
+ * from that list. The value was always persisted; only the display lied.
+ */
+test("regression: project hard equal to user stays reported and rendered, absent stays 'not set'", async () => {
+	const dir = tmpDir("app");
+	const proj = path.join(dir, "proj");
+	fs.mkdirSync(proj, { recursive: true });
+	const TWO_H = 7_200_000;
+	const a = app(dir, FAKE_OK, { hardTimeoutMs: TWO_H });
+	const { projectConfigPath, resolveRunTimeouts } = await import("../config.ts");
+
+	// (a) key ABSENT from the project file → still "not set"
+	const s0 = a.getStatus(["read"], proj);
+	assert.equal(s0.timeouts.userHardMs, TWO_H);
+	assert.equal(s0.timeouts.projectHardMs, undefined, "absent key must not be reported");
+	assert.deepEqual(s0.timeouts.projectSetKeys, []);
+	assert.deepEqual(s0.timeouts.projectOverrides, []);
+	assert.equal(s0.timeouts.source, "user");
+	assert.equal(projectValueCell(s0.timeouts.projectHardMs, s0.timeouts.userHardMs), "not set");
+
+	// (b) project writes the SAME value as the user layer
+	assert.equal(a.patchProjectConfig(proj, "hardTimeoutMs", "2h"), null);
+	assert.equal(JSON.parse(fs.readFileSync(projectConfigPath(proj), "utf8")).hardTimeoutMs, TWO_H, "value is persisted");
+	const s1 = a.getStatus(["read"], proj);
+	assert.equal(s1.timeouts.hardMs, TWO_H);
+	assert.equal(s1.timeouts.userHardMs, TWO_H);
+	assert.equal(s1.timeouts.projectHardMs, TWO_H, "file truth: reported even when equal to user");
+	assert.deepEqual(s1.timeouts.projectSetKeys, ["hardTimeoutMs"]);
+	assert.deepEqual(s1.timeouts.projectOverrides, [], "unchanged effective value is not an override");
+	assert.equal(s1.timeouts.source, "user", "provenance semantics unchanged");
+	assert.equal(projectValueCell(s1.timeouts.projectHardMs, s1.timeouts.userHardMs), "2h (= user)");
+
+	// (c) a genuinely different project value keeps the previous rendering
+	assert.equal(a.patchProjectConfig(proj, "hardTimeoutMs", "4h"), null);
+	const s2 = a.getStatus(["read"], proj);
+	assert.equal(s2.timeouts.projectHardMs, 14_400_000);
+	assert.deepEqual(s2.timeouts.projectOverrides, ["hardTimeoutMs"]);
+	assert.equal(s2.timeouts.source, "project");
+	assert.equal(projectValueCell(s2.timeouts.projectHardMs, s2.timeouts.userHardMs), "4h");
+
+	// (d) run resolution still honors the cascade (override semantics intact)
+	assert.equal(resolveRunTimeouts({ ...DEFAULT_DELEGATE_CONFIG, hardTimeoutMs: s2.timeouts.hardMs }).hardMs, 14_400_000);
 });

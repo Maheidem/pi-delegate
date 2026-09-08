@@ -1,7 +1,7 @@
 /** ui/format.ts — canonical formatters (reuse mandate, FIELDS §2/§3). */
 import test from "node:test";
 import * as assert from "node:assert/strict";
-import { formatDuration, formatTokens, formatCost, formatSize, shortModel, stateGlyph, progressBar } from "../ui/format.ts";
+import { formatDuration, formatTokens, formatCost, formatSize, shortModel, stateGlyph, progressBar, projectValueCell } from "../ui/format.ts";
 
 test("formatDuration delegates to config canonical", () => {
 	assert.equal(formatDuration(0), "0ms");
@@ -50,4 +50,18 @@ test("progressBar: bounded 0–1, includes percent text", () => {
 	assert.match(progressBar(1, 10), /^█+ 100%$/);
 	assert.match(progressBar(0.5, 10), /50%$/);
 	assert.match(progressBar(5, 10), /100%$/, "clamped >1");
+});
+
+test("projectValueCell: file truth — equal-to-user gets a marker, absent is 'not set'", () => {
+	// the display lie: project value present and EQUAL to user → visible, marked
+	assert.equal(projectValueCell(7_200_000, 7_200_000), "2h (= user)");
+	// differing project value → plain duration (unchanged rendering)
+	assert.equal(projectValueCell(14_400_000, 7_200_000), "4h");
+	assert.equal(projectValueCell(30_000, 7_200_000), "30s");
+	// absent from the project file → the ONLY case that reads "not set"
+	assert.equal(projectValueCell(undefined, 7_200_000), "not set");
+	// non-finite guards (never "NaNh", never a false value)
+	assert.equal(projectValueCell(Number.NaN, 7_200_000), "not set");
+	assert.equal(projectValueCell(Number.POSITIVE_INFINITY, 7_200_000), "not set");
+	assert.equal(projectValueCell(7_200_000, undefined), "2h");
 });

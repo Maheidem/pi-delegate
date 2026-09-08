@@ -327,15 +327,24 @@ export function projectConfigPath(projectRoot: string): string {
  *    (a broken project file must never break delegations);
  *  - only keys PRESENT in the project file override (no default backfill);
  *  - values are clamped by the same min/max bounds as the user config.
+ * Two diagnostic arrays, deliberately different:
+ *  - `projectOverrides`: keys that CHANGE the effective value (equality vs
+ *    base). Resolution/provenance logic depends on this — do not widen.
+ *  - `projectSetKeys`: every known key explicitly PRESENT in the file,
+ *    regardless of equality with the base. Display code must use this, so a
+ *    project value that happens to equal the user value never renders as
+ *    "not set". A key whose value is invalid is still reported as set (it
+ *    is in the file); its effective value then equals the base value.
  * Returns a NEW config object; the base is never mutated.
  */
 export function applyProjectOverlay(
 	base: DelegateConfigV1,
 	projectRoot: string,
-): DelegateConfigV1 & { projectOverrides: string[]; projectCorrupt?: string } {
-	const result: DelegateConfigV1 & { projectOverrides: string[]; projectCorrupt?: string } = {
+): DelegateConfigV1 & { projectOverrides: string[]; projectSetKeys: string[]; projectCorrupt?: string } {
+	const result: DelegateConfigV1 & { projectOverrides: string[]; projectSetKeys: string[]; projectCorrupt?: string } = {
 		...base,
 		projectOverrides: [],
+		projectSetKeys: [],
 	};
 	const pPath = projectConfigPath(projectRoot);
 	let raw: unknown;
@@ -351,9 +360,13 @@ export function applyProjectOverlay(
 	const record = raw as Record<string, unknown>;
 	const known = new Set<string>(Object.keys(DEFAULT_DELEGATE_CONFIG));
 	const overrides: string[] = [];
+	const setKeys: string[] = [];
 	for (const key of Object.keys(record)) {
 		if (key === "schemaVersion") continue;
 		if (!knownKey(key)) continue; // unknown keys in project overlay ignored
+		// File truth: present in the project file counts as set even when the
+		// normalized value equals the base value (the override list would omit it).
+		setKeys.push(key);
 		try {
 			const probe: DelegateConfigV1 = { ...DEFAULT_DELEGATE_CONFIG };
 			applyKnownField(probe, key, record[key]);
@@ -367,6 +380,7 @@ export function applyProjectOverlay(
 		}
 	}
 	result.projectOverrides = overrides;
+	result.projectSetKeys = setKeys;
 	return result;
 }
 
@@ -382,14 +396,15 @@ export function loadConfigCascade(
 	agentDir: string,
 	projectRoot?: string,
 	configPath?: string,
-): ConfigLoadResult & { projectOverrides: string[]; projectCorrupt?: string } {
+): ConfigLoadResult & { projectOverrides: string[]; projectSetKeys: string[]; projectCorrupt?: string } {
 	const base = loadConfig(agentDir, configPath);
 	if (!projectRoot) {
-		return { ...base, projectOverrides: [] };
+		return { ...base, projectOverrides: [], projectSetKeys: [] };
 	}
 	const overlay = applyProjectOverlay(base.config, projectRoot);
-	const { projectOverrides, projectCorrupt, ...rest } = overlay as unknown as DelegateConfigV1 & {
+	const { projectOverrides, projectSetKeys, projectCorrupt, ...rest } = overlay as unknown as DelegateConfigV1 & {
 		projectOverrides: string[];
+		projectSetKeys: string[];
 		projectCorrupt?: string;
 	};
 	const config: DelegateConfigV1 = { ...(rest as unknown as DelegateConfigV1) };
@@ -397,6 +412,7 @@ export function loadConfigCascade(
 		...base,
 		config,
 		projectOverrides: overlay.projectOverrides,
+		projectSetKeys: overlay.projectSetKeys,
 		projectCorrupt: overlay.projectCorrupt,
 	};
 }

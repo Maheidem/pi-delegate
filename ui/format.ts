@@ -20,6 +20,19 @@ export function formatTokens(n: number | undefined): string {
 	return `${Math.round(n / 100_000) / 10}M`;
 }
 
+/**
+ * Project-layer config cell for dashboard rows. The project FILE is the
+ * source of truth for presence: a value equal to the user layer renders as
+ * `2h (= user)` instead of reading as unset, and "not set" appears ONLY when
+ * the key is absent from the file. `undefined` means absent.
+ */
+export function projectValueCell(value: number | undefined, userValue: number | undefined): string {
+	if (value === undefined || !Number.isFinite(value)) return "not set";
+	const text = formatDuration(value);
+	if (userValue !== undefined && Number.isFinite(userValue) && value === userValue) return `${text} (= user)`;
+	return text;
+}
+
 /** Cost as `$X.YZ` (2 dp) or `$0.00`. Never emoji. */
 export function formatCost(cost: number | undefined): string {
 	return `$${(cost ?? 0).toFixed(2)}`;

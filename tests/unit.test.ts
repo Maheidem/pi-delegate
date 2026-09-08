@@ -750,10 +750,12 @@ test("timeout: project config overlays user config field-by-field", async () => 
 	assert.equal(res.config.hardTimeoutMs, 7_200_000, "project overrides user");
 	assert.equal(res.config.inactivityTimeoutMs, 120_000, "unlisted keys keep user value");
 	assert.deepEqual(res.projectOverrides, ["hardTimeoutMs"]);
+	assert.deepEqual(res.projectSetKeys, ["hardTimeoutMs"], "file truth: present keys are reported");
 	// no project file → user config unchanged
 	const res2 = loadConfigCascade(agentDir, path.join(dir, "no-proj"));
 	assert.equal(res2.config.hardTimeoutMs, 600_000);
 	assert.deepEqual(res2.projectOverrides, []);
+	assert.deepEqual(res2.projectSetKeys, []);
 	// corrupt project file → user wins, diagnosed
 	fs.writeFileSync(projectConfigPath(proj), "{ not json");
 	const res3 = loadConfigCascade(agentDir, proj);
@@ -774,6 +776,35 @@ test("timeout: project values are clamped by the same bounds", async () => {
 	fs.writeFileSync(projectConfigPath(proj), JSON.stringify({ hardTimeoutMs: 999_999_999_999 }));
 	const res = loadConfigCascade(agentDir, proj);
 	assert.equal(res.config.hardTimeoutMs, 604_800_000, "clamped to max week");
+	assert.deepEqual(res.projectSetKeys, ["hardTimeoutMs"], "clamped key still counts as set");
+});
+
+test("overlay: projectSetKeys reports every known key in the file, equal to base or not", async () => {
+	const { applyProjectOverlay, DEFAULT_DELEGATE_CONFIG, projectConfigPath } = await import("../config.ts");
+	const fs = await import("node:fs");
+	const os = await import("node:os");
+	const path = await import("node:path");
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-setkeys-"));
+	const proj = path.join(dir, "proj");
+	const base = { ...DEFAULT_DELEGATE_CONFIG };
+	// missing file → neither array populated
+	assert.deepEqual(applyProjectOverlay(base, proj).projectSetKeys, []);
+	assert.deepEqual(applyProjectOverlay(base, proj).projectOverrides, []);
+	// hardTimeoutMs EQUAL to base (the display-lie case) + one differing key
+	// + schemaVersion + an unknown key, which are never reported as set
+	fs.mkdirSync(path.dirname(projectConfigPath(proj)), { recursive: true });
+	fs.writeFileSync(projectConfigPath(proj), JSON.stringify({ schemaVersion: 1, hardTimeoutMs: base.hardTimeoutMs, queueLimit: 9, notAKey: 1 }));
+	const r1 = applyProjectOverlay(base, proj);
+	assert.equal(r1.hardTimeoutMs, base.hardTimeoutMs, "equal value changes nothing effective");
+	assert.equal(r1.queueLimit, 9);
+	assert.deepEqual(r1.projectOverrides, ["queueLimit"], "overrides stay equality-based");
+	assert.deepEqual(r1.projectSetKeys, ["hardTimeoutMs", "queueLimit"], "set keys are file presence");
+	// corrupt file → nothing contributed, nothing reported as set
+	fs.writeFileSync(projectConfigPath(proj), "{ broken");
+	const r2 = applyProjectOverlay(base, proj);
+	assert.ok(r2.projectCorrupt);
+	assert.deepEqual(r2.projectSetKeys, []);
+	assert.deepEqual(r2.projectOverrides, []);
 });
 
 // ── Timeout display + project saves ───────────────────────────────────────

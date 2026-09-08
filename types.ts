@@ -346,11 +346,13 @@ export interface DelegateStatus {
 		source: "user" | "project";
 		userHardMs: number;
 		userInactivityMs: number;
-		/** Present when the project file overrides the hard timeout. */
+		/** Present when the project file sets the hard timeout (file truth, even when equal to user). */
 		projectHardMs?: number;
 		projectPath?: string;
-		/** Config keys overridden by the project file. */
+		/** Config keys that CHANGE the effective value (equality vs the user layer). */
 		projectOverrides?: string[];
+		/** Config keys PRESENT in the project file, whether or not they differ from user. */
+		projectSetKeys?: string[];
 		/** Set when a corrupt project file was ignored (user values used). */
 		projectCorrupt?: string;
 	};

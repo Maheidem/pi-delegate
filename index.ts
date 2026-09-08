@@ -39,7 +39,7 @@ import type {
 	SessionEntryLike,
 } from "./types.ts";
 import { SettingsPanel, type PanelSnapshot, type PanelActionResult, type PanelSection, type PanelRow } from "./ui/settings-panel.ts";
-import { shortModel, formatTokens, formatCost, stateGlyph, progressBar } from "./ui/format.ts";
+import { shortModel, formatTokens, formatCost, stateGlyph, progressBar, projectValueCell } from "./ui/format.ts";
 import { RunningView, type RunningViewState } from "./ui/running-view.ts";
 import { PeekView } from "./ui/peek-view.ts";
 import { FeedRing, feedEventsFromTranscript, renderFeedEvents } from "./transcript-feed.ts";
@@ -949,7 +949,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			rows: [
 				{ key: "cfg:user:hardTimeoutMs", label: "Hard · user-wide", value: formatDuration(t.userHardMs), rawValue: String(t.userHardMs), kind: "input", inputHint: "e.g. 30m / 2h / 1d — user config" },
 				{ key: "cfg:user:inactivityTimeoutMs", label: "Idle · user-wide", value: formatDuration(t.userInactivityMs), rawValue: String(t.userInactivityMs), kind: "input", inputHint: "no-output watchdog; capped at ½ hard" },
-				{ key: "cfg:project:hardTimeoutMs", label: "Hard · project", value: t.projectHardMs !== undefined ? formatDuration(t.projectHardMs) : "not set", rawValue: t.projectHardMs !== undefined ? String(t.projectHardMs) : "", kind: "input", inputHint: `merges into ${t.projectPath ?? ".pi/delegate/config.json"}` },
+				{ key: "cfg:project:hardTimeoutMs", label: "Hard · project", value: projectValueCell(t.projectHardMs, t.userHardMs), rawValue: t.projectHardMs !== undefined ? String(t.projectHardMs) : "", kind: "input", inputHint: `merges into ${t.projectPath ?? ".pi/delegate/config.json"}` },
 				...(t.projectCorrupt
 					? [{ key: "project-corrupt", label: "Project config", value: "corrupt — user values used", kind: "info" as const, valueStyle: "warning" as const }]
 					: []),
