@@ -123,11 +123,17 @@ export class RunningView implements Component {
 
 		const footer = this.cancelArmed ? fg("error", "ESC again: CONFIRM cancel") : "esc/q cancel (press twice)";
 
+		// In-flight tools are the NORMAL state of a running child, not a
+		// problem: amber ("warning") is read by humans as trouble, so this row
+		// stays neutral/dim. Reserve "warning" for degraded and "error" for
+		// failed (see skills/pi-extension-builder OPERATIONAL-EXTENSIONS.md).
+		const inFlightColor: ThemeColor | undefined = openTools.length > 0 ? "dim" : undefined;
+
 		// Assemble a fixed-height body: header, progress, in-flight, feed block, footer.
 		const body: Array<[string, ThemeColor?]> = [
 			[head],
 			[progress, "accent"],
-			[inFlight, inFlight ? "warning" : undefined],
+			[inFlight, inFlightColor],
 			...feedRows.map((l): [string, ThemeColor?] => [l, l ? "text" : undefined]),
 			[footer, this.cancelArmed ? "error" : "dim"],
 		];

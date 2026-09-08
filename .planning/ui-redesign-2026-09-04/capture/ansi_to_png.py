@@ -21,10 +21,15 @@ def xterm256(i):
     v=(i-232)*10+8; return (v,v,v)
 
 SGR = re.compile(r"\x1b\[([0-9;]*)m")
+# OSC sequences (e.g. tmux's OSC 8 hyperlinks) are markup, not visible text:
+# strip them before width measurement and drawing, otherwise the literal URL is
+# painted into the cells and the frame overflows its own border.
+OSC = re.compile(r"\x1b\][^\x07]*?(?:\x07|\x1b\\)")
 
 def render(text, out):
     font = ImageFont.truetype(FONT, SIZE)
     cell_w = int(font.getlength("M")) or SIZE
+    text = OSC.sub("", text)
     lines = text.rstrip("\n").split("\n")
     cols = max((len(re.sub(r"\x1b\[[0-9;]*m","",l)) for l in lines), default=1)
     img = Image.new("RGB", (cols*cell_w+16, len(lines)*CELL_H+16), BG_DEFAULT)

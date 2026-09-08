@@ -279,3 +279,58 @@ test("feed: transcript decode → events (raw + base64 eras)", () => {
 	const missing = feedEventsFromTranscript(path.join(dir, "nope.jsonl"));
 	assert.equal(missing.events.length, 0);
 });
+test("feed: content that merely MENTIONS 'error' never renders as failure (del_20260908T113930Z)", () => {
+	// Regression: the old heuristic /\berror\b/i on the result *head* flagged a
+	// successful read of a source file as ✗ in the live feed. Failure now comes
+	// from the AUTHORITATIVE status flags only — top-level `isError` (what Pi's
+	// RPC actually emits), `result.isError`, or snake_case `is_error`.
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "feed-err-"));
+	const file = path.join(dir, "t.jsonl");
+	const t0 = Date.parse("2026-09-08T11:39:30.000Z");
+	const mk = (seq: number, sec: number, rec: unknown) => ({
+		schemaVersion: 1,
+		sequence: seq,
+		receivedAt: new Date(t0 + sec * 1000).toISOString(),
+		stream: "stdout",
+		raw: JSON.stringify(rec),
+	});
+	const recs = [
+		mk(0, 0, { type: "tool_execution_start", toolCallId: "r1", toolName: "read", args: { path: "index.ts" } }),
+		// SUCCESS whose first content line is `throw new Error(...)` — the reported false positive.
+		mk(1, 1, {
+			type: "tool_execution_end",
+			toolCallId: "r1",
+			toolName: "read",
+			isError: false,
+			result: { content: [{ type: "text", text: 'throw new Error("parent did not reach idle")\nmore source' }] },
+		}),
+		mk(2, 2, { type: "tool_execution_start", toolCallId: "b1", toolName: "bash", args: { command: "npm test" } }),
+		mk(3, 3, { type: "tool_execution_end", toolCallId: "b1", toolName: "bash", isError: false, result: { content: [{ type: "text", text: "0 errors, 42 tests passed" }] } }),
+		// GENUINE failures, carried the way Pi actually emits them (TOP level)…
+		mk(4, 4, { type: "tool_execution_start", toolCallId: "b2", toolName: "bash", args: { command: "make" } }),
+		mk(5, 5, { type: "tool_execution_end", toolCallId: "b2", toolName: "bash", isError: true, result: { content: [{ type: "text", text: "Command exited with code 2" }] } }),
+		// …and in the other two accepted flag positions.
+		mk(6, 6, { type: "tool_execution_end", toolCallId: "e1", toolName: "edit", result: { content: [{ type: "text", text: "oldText not found" }], isError: true } }),
+		mk(7, 7, { type: "tool_execution_end", toolCallId: "e2", toolName: "grep", is_error: true, result: { content: [{ type: "text", text: "search failed" }] } }),
+	];
+	fs.writeFileSync(file, recs.map((r) => JSON.stringify(r)).join("\n"));
+
+	const { startMs, events } = feedEventsFromTranscript(file);
+	const end = (id: string) => events.find((e) => e.kind === "tool_end" && e.tool === id);
+
+	assert.equal(end("read")?.isError, false, "read of a file containing Error() is NOT an error");
+	assert.equal(end("bash")?.isError, false, "bash output mentioning '0 errors' is NOT an error");
+	assert.equal(end("edit")?.isError, true, "result.isError is authoritative");
+	assert.equal(end("grep")?.isError, true, "snake_case is_error is authoritative");
+	// The genuine bash failure is the FIRST bash end (b1 succeeded at +3s, b2 failed at +5s).
+	const bashEnds = events.filter((e) => e.kind === "tool_end" && e.tool === "bash");
+	assert.deepEqual(bashEnds.map((e) => Boolean(e.isError)), [false, true], "bash: success then genuine failure");
+
+	const lines = renderFeedEvents(events, { startMs });
+	assert.ok(lines.some((l) => /^.*✓ read index\.ts/.test(l)), `successful read renders ✓ — got: ${lines.join(" | ")}`);
+	assert.ok(lines.some((l) => /✓ bash 0 errors, 42 tests passed/.test(l)), "clean npm test renders ✓");
+	assert.ok(!lines.some((l) => /✗/.test(l) && /index\.ts|0 errors/.test(l)), "no ✗ on successful calls");
+	assert.ok(lines.some((l) => /✗ bash Command exited with code 2/.test(l)), "real failure renders ✗");
+	assert.ok(lines.some((l) => /✗ edit oldText not found/.test(l)), "result.isError failure renders ✗");
+	assert.ok(lines.some((l) => /✗ grep search failed/.test(l)), "snake_case failure renders ✗");
+});

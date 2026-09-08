@@ -842,3 +842,22 @@ test("R7: delegateVersion matches package.json", async () => {
 	assert.equal(delegateVersion(), pkg.version);
 	assert.notEqual(delegateVersion(), "unknown");
 });
+
+test("classify: tool_end failure flag is authoritative, never content-derived", () => {
+	// Pi emits `isError` at the TOP level of tool_execution_end; reading only
+	// `result.isError` silently marked every real tool failure as a success.
+	// Content is NEVER a failure signal (see transcript-feed.ts toolFailed).
+	const mk = (parsed: unknown) => ({ raw: Buffer.from(""), parsed, malformed: false }) as never;
+	const flagged = classifyRpcRecord(
+		mk({ type: "tool_execution_end", toolCallId: "b", toolName: "bash", isError: true, result: { content: [{ type: "text", text: "Command exited with code 1" }] } }),
+	) as { result?: { isError?: boolean } };
+	assert.equal(flagged.result?.isError, true, "top-level isError survives classification");
+	const nested = classifyRpcRecord(mk({ type: "tool_execution_end", result: { isError: true, content: [] } })) as { result?: { isError?: boolean } };
+	assert.equal(nested.result?.isError, true, "result.isError still honoured");
+	const snake = classifyRpcRecord(mk({ type: "tool_execution_end", is_error: true, result: { content: [] } })) as { result?: { isError?: boolean } };
+	assert.equal(snake.result?.isError, true, "snake_case is_error still honoured");
+	const okButAlarming = classifyRpcRecord(
+		mk({ type: "tool_execution_end", isError: false, result: { content: [{ type: "text", text: 'throw new Error("boom") — 0 errors' }] } }),
+	) as { result?: { isError?: boolean } };
+	assert.equal(okButAlarming.result?.isError, false, "content mentioning 'error' is not a failure");
+});

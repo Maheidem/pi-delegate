@@ -12,57 +12,94 @@
   },
   "screens": {
     "S1-home": {
-      "files": ["shots/S1-home@80.png", "shots/S1-home@62.png", "shots/S1-home@20.png", "shots/S1-home-live.png"],
+      "files": [
+        "shots/S1-home@80.png",
+        "shots/S1-home@62.png",
+        "shots/S1-home@20.png",
+        "shots/S1-home-live.png"
+      ],
       "surface": "home dashboard (vendored SettingsPanel)",
       "mustShow": "title 'Delegation'; health summary (version·mode, active/idle, last); Actions incl. Run general/research, Peek, Cancel (disabled when idle), Resume, strict toggle, 'Configure advanced… ›', Doctor, Paths; base Timeouts (user hard/idle, project); shortcut footer; borders intact at 80/62/20; no input-bar smear."
     },
     "S2-home-live": {
-      "files": ["shots/S2-home-live@80.png", "shots/S2-home-live@62.png", "shots/S2-home-live@20.png"],
+      "files": [
+        "shots/S2-home-live@80.png",
+        "shots/S2-home-live@62.png",
+        "shots/S2-home-live@20.png"
+      ],
       "surface": "home dashboard LIVE block (refresh)",
       "mustShow": "Live section: Phase (accent) · shortModel; fixed progress bar % of hard; Tokens ↑in ↓out (primary) · $cost (muted, secondary); In flight tool; tail event; Cancel enabled while active."
     },
     "S4-inline-strip": {
-      "files": ["shots/S4-inline-strip@80.png", "shots/S4-inline-strip@62.png", "shots/S4-inline-strip@20.png"],
+      "files": [
+        "shots/S4-inline-strip@80.png",
+        "shots/S4-inline-strip@62.png",
+        "shots/S4-inline-strip@20.png"
+      ],
       "surface": "slash composer inline execution strip (RunningView)",
-      "mustShow": "FIXED height (no height change between frames); header role·shortModel·elapsed·turn·↑↓tokens; progress bar; in-flight (warning); ≥1 feed line; 'esc/q cancel (press twice)' footer; borders valid incl. width 20; color inner-text only."
+      "mustShow": "FIXED height (no height change between frames); header role·shortModel·elapsed·turn·↑↓tokens; progress bar; in-flight NEUTRAL/dim — never warning (running is the normal state, amber reads as trouble); feed marks: ✗ ONLY from authoritative status flags (top-level isError / result.isError), never inferred from result content — a successful read whose text contains `throw new Error(...)` renders ✓; 'esc/q cancel (press twice)' footer; borders valid incl. width 20; color inner-text only. Note: shots since 2026-09-08 09:41 are generated through the real decode path (feedEventsFromTranscript → renderFeedEvents), not scripted strings."
     },
     "S6-peek": {
-      "files": ["shots/S6-peek.png", "shots/S6-peek-live.png"],
+      "files": [
+        "shots/S6-peek.png",
+        "shots/S6-peek-live.png"
+      ],
       "surface": "detailed peek overlay (PeekView)",
       "mustShow": "overlay fixed 20 rows; full model id in header; scrollable event feed with +Ns relative stamps; live/final mode label; 'q close'; returns to home/dashboard."
     },
     "S7-advanced": {
-      "files": ["shots/S7-advanced@80.png", "shots/S7-advanced@62.png", "shots/S7-advanced@20.png"],
+      "files": [
+        "shots/S7-advanced@80.png",
+        "shots/S7-advanced@62.png",
+        "shots/S7-advanced@20.png"
+      ],
       "surface": "secondary advanced config (vendored SettingsPanel)",
       "mustShow": "knobs: queueLimit, stuck-tool watchdog, kill grace, handoff grace/enforce, max task/result bytes, default role (info); editable inputs right-aligned; opened from 'Configure advanced…'; esc returns home."
     },
     "S8-cancel-confirm": {
-      "files": ["shots/S8-cancel-confirm.png", "shots/S8-cancel-confirm-live.png"],
+      "files": [
+        "shots/S8-cancel-confirm.png",
+        "shots/S8-cancel-confirm-live.png"
+      ],
       "surface": "destructive cancel confirmation",
       "mustShow": "framed confirm: question 'Cancel active run?'; consequence line (SIGTERM→SIGKILL, partial handoff); Yes/No choice highlighted (not color-alone); default not destructive-accidental."
     },
     "S9-doctor": {
-      "files": ["shots/S9-doctor.png", "shots/S9-doctor-live.png"],
+      "files": [
+        "shots/S9-doctor.png",
+        "shots/S9-doctor-live.png"
+      ],
       "surface": "doctor report (headless-reachable via slash)",
       "mustShow": "diagnostic checks with ✓/⚠/✗ glyph+word (never color-alone): node, child-mode, store, config timeouts (hard/idle/stuck), model server reachability, recent runs, handoff mode."
     },
     "S9-paths": {
-      "files": ["shots/S9-paths.png", "shots/S9-paths-live.png"],
+      "files": [
+        "shots/S9-paths.png",
+        "shots/S9-paths-live.png"
+      ],
       "surface": "paths report (headless-reachable via slash)",
       "mustShow": "config path, runs dir, sessions dir, last run + transcript paths."
     },
     "S5-toolpath": {
-      "files": ["shots/toolpath-during.png", "shots/toolpath-done.png", "shots/toolpath-cancelled.png"],
+      "files": [
+        "shots/toolpath-during.png",
+        "shots/toolpath-done.png",
+        "shots/toolpath-cancelled.png"
+      ],
       "surface": "MODEL path — delegate tool renderCall/renderResult (the reported-broken surface)",
       "mustShow": "during: live strip with in-flight + tail; done: neutral card '✓ done' with ↑↓tokens · $cost · shortModel; cancelled: '⊘ cancelled' (NOT a bare 'error:') with partial-handoff tail + resume hint; timeout would render 'timeout · idle/hard' warning. Proves the model path no longer emits bare error:."
     },
     "demo.gif": {
-      "files": ["demo.gif"],
+      "files": [
+        "demo.gif"
+      ],
       "surface": "live motion",
       "mustShow": "ordered live sequence: home dashboard → run → inline strip frames (feed filling) → peek → cancel-confirm."
     },
     "real-session.html": {
-      "files": ["real-session.html"],
+      "files": [
+        "real-session.html"
+      ],
       "surface": "durable real delegating session (pi --export)",
       "mustShow": "Pi's own HTML export of a real child session that delegated: tool calls, handoff, final result."
     }
@@ -73,5 +110,6 @@
     "never-color-alone": "every state shown as glyph+word",
     "timers": "refresh timers cleared on overlay close and session_shutdown",
     "destructive": "cancel and strict-toggle require confirmation"
-  }
+  },
+  "lastUpdated": "2026-09-08T13:03:28+00:00"
 }

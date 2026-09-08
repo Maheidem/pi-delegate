@@ -175,7 +175,21 @@ export function classifyRpcRecord(record: RpcRecord): RpcRecordClassification {
 				id: typeof obj.toolCallId === "string" ? obj.toolCallId : undefined,
 				toolName: typeof obj.toolName === "string" ? obj.toolName : undefined,
 				...(result && typeof result === "object"
-					? { result: { details: result.details, isError: result.isError === true, ...(textHead ? { textHead } : {}) } }
+					? {
+							result: {
+								details: result.details,
+								// Authoritative flags only. Pi emits `isError` at the TOP level of
+								// the event (verified against captured transcripts); `result.isError`
+								// is unset there. Reading only `result.isError` silently marked every
+								// genuine tool failure as success. Content is NEVER a failure signal.
+								isError:
+									obj.isError === true ||
+									obj.is_error === true ||
+									result.isError === true ||
+									result.is_error === true,
+								...(textHead ? { textHead } : {}),
+							},
+						}
 					: {}),
 			};
 		}

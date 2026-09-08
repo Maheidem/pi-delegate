@@ -72,3 +72,34 @@ test("running-view: armed cancel re-renders the confirm footer", () => {
 	assert.ok(lines.some((l) => /CONFIRM/i.test(l)));
 	assert.equal(lines.length, 9);
 });
+
+test("running-view: in-flight tools render NEUTRAL (dim), never warning", () => {
+	// "in flight: bash" is the NORMAL state of a running child. Amber reads as
+	// trouble, so this row must not use the warning colour (only the armed
+	// cancel footer keeps error-red).
+	const calls: Array<{ kind: string; text: string }> = [];
+	const spy: any = { fg: (kind: string, text: string) => (calls.push({ kind, text }), text) };
+	const v = new RunningView({
+		theme: spy,
+		keybindings,
+		state: () => ({ ...base, openTools: ["bash", "edit"], feedLines: ["+1s ▶ bash npm test"] }),
+		done: () => {},
+	});
+	const lines = v.render(80);
+	assert.equal(lines.length, 9, "fixed height preserved");
+	const inflight = lines.find((l) => l.includes("in flight: bash, edit"));
+	assert.ok(inflight, "in-flight row rendered");
+	const flagged = calls.filter((c) => c.text.includes("in flight:"));
+	assert.ok(flagged.length > 0, "in-flight row went through the theme");
+	assert.deepEqual([...new Set(flagged.map((c) => c.kind))], ["dim"], "in-flight is dim, not warning");
+	assert.ok(!calls.some((c) => c.kind === "warning"), "no warning styling while merely running");
+});
+
+test("running-view: armed cancel still uses the error colour", () => {
+	const calls: Array<{ kind: string; text: string }> = [];
+	const spy: any = { fg: (kind: string, text: string) => (calls.push({ kind, text }), text) };
+	const v = new RunningView({ theme: spy, keybindings, state: () => ({ ...base, openTools: ["bash"] }), done: () => {} });
+	v.handleInput("\x1b");
+	v.render(80);
+	assert.ok(calls.some((c) => c.kind === "error" && /CONFIRM/i.test(c.text)), "armed cancel stays red");
+});

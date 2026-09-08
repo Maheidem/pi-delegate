@@ -8,6 +8,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+// Env guard: tests must run in PARENT mode; when npm test is inherited by a delegated child session these leak in and make index.ts load inert (see tests/load.test.ts).
+for (const k of ["PI_DELEGATE_CHILD", "PI_DELEGATE_RUN_ID", "PI_DELEGATE_PARENT_PID"]) delete process.env[k];
 const files = fs.readdirSync(here).filter((f) => f.endsWith(".test.ts")).sort();
 if (files.length === 0) {
 	console.error("no tests found");

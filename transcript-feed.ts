@@ -100,7 +100,15 @@ interface ParsedRecord {
 	toolCallId?: string;
 	toolName?: string;
 	args?: unknown;
-	result?: { content?: Array<{ type?: string; text?: string }>; isError?: boolean; details?: { delegateHandoff?: { outcome?: string } } };
+	/** Authoritative failure flag — Pi carries it at the TOP level. */
+	isError?: boolean;
+	is_error?: boolean;
+	result?: {
+		content?: Array<{ type?: string; text?: string }>;
+		isError?: boolean;
+		is_error?: boolean;
+		details?: { delegateHandoff?: { outcome?: string } };
+	};
 	message?: {
 		role?: string;
 		stopReason?: string;
@@ -123,6 +131,26 @@ function parseEnvelope(line: string): { atMs: number; rec: ParsedRecord | null }
 	} catch {
 		return { atMs: 0, rec: null };
 	}
+}
+
+/**
+ * Authoritative failure flags ONLY. Pi's `tool_execution_end` records carry
+ * `isError` at the TOP level of the record (`result.isError` is unset in
+ * captured transcripts), so both positions are read; snake_case `is_error` is
+ * tolerated for other RPC producers.
+ *
+ * NEVER infer failure from result *content*: a successful `read` of a source
+ * file whose text contains `throw new Error("…")` is a SUCCESS, and a red
+ * `✗ read …` in the live feed is indistinguishable from a real failure to
+ * the user (cautionary instance: run del_20260908T113930Z_72cc3f31).
+ */
+function toolFailed(rec: ParsedRecord): boolean {
+	return (
+		rec.isError === true ||
+		rec.is_error === true ||
+		rec.result?.isError === true ||
+		rec.result?.is_error === true
+	);
 }
 
 function resultTextHead(result: ParsedRecord["result"]): string {
@@ -184,7 +212,8 @@ export function feedEventsFromTranscript(
 							kind: "tool_end",
 							tool: name,
 							detail,
-							isError: rec.result?.isError === true || /\berror\b/i.test(head.slice(0, 40)),
+							// Status flags only — `head` is untrusted content (see toolFailed).
+							isError: toolFailed(rec),
 							...(open ? { durationMs: atMs - open.atMs } : {}),
 						});
 						break;

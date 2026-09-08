@@ -106,21 +106,53 @@ function panel(name, snap) {
 	png(name + "@20", render(p, 20));
 }
 
+
 // RunningView + PeekView + vendored SettingsPanel via strip-types.
 import { RunningView } from "../../../ui/running-view.ts";
 import { PeekView } from "../../../ui/peek-view.ts";
 import { SettingsPanel } from "../../../ui/settings-panel.ts";
+import { feedEventsFromTranscript, renderFeedEvents } from "../../../transcript-feed.ts";
 
-// S4 inline strip — fixed-height live component (real RunningView)
+// S4 inline strip — fixed-height live component (real RunningView), fed by the
+// REAL decode path (feedEventsFromTranscript → renderFeedEvents) so the shot
+// proves the del_20260908T113930Z fix: a SUCCESSFUL read whose first text line
+// contains `throw new Error(...)` renders ✓ (never ✗). Failure marks come only
+// from authoritative status flags; the in-flight row is neutral/dim, not amber.
+const stripT0 = Date.parse("2026-09-08T11:39:30.000Z");
+const stripRec = (seq, sec, rec) => ({
+	schemaVersion: 1,
+	sequence: seq,
+	receivedAt: new Date(stripT0 + sec * 1000).toISOString(),
+	stream: "stdout",
+	raw: JSON.stringify(rec),
+});
+const stripTranscript = "/tmp/delcap-strip-transcript.jsonl";
+fs.writeFileSync(
+	stripTranscript,
+	[
+		stripRec(0, 6, { type: "tool_execution_start", toolCallId: "a", toolName: "read", args: { path: "config.ts" } }),
+		stripRec(1, 9, { type: "tool_execution_end", toolCallId: "a", toolName: "read", isError: false, result: { content: [{ type: "text", text: "export const PANEL_ROWS = 9;" }] } }),
+		// Authoritative failure (top-level isError) — the ONLY ✗ in the strip.
+		stripRec(2, 24, { type: "tool_execution_start", toolCallId: "b", toolName: "edit", args: { path: "index.ts" } }),
+		stripRec(3, 27, { type: "tool_execution_end", toolCallId: "b", toolName: "edit", isError: true, result: { content: [{ type: "text", text: "oldText not found in file" }] } }),
+		// Cautionary instance (del_20260908T113930Z): a SUCCESSFUL read whose
+		// first line contains `throw new Error(...)` — must render ✓, never ✗.
+		stripRec(4, 31, { type: "tool_execution_start", toolCallId: "c", toolName: "read", args: { path: "runner.ts" } }),
+		stripRec(5, 34, { type: "tool_execution_end", toolCallId: "c", toolName: "read", isError: false, result: { content: [{ type: "text", text: 'throw new Error("parent did not reach idle")\nconst idle = true;' }] } }),
+		stripRec(6, 38, { type: "tool_execution_start", toolCallId: "d", toolName: "bash", args: { command: "npm test" } }),
+	].map((r) => JSON.stringify(r)).join("\n"),
+);
+const stripFeed = feedEventsFromTranscript(stripTranscript);
 const runningState = {
 	runId: "run-abcdef012345", role: "general", model: "zai/glm-5.3", phase: "tool:bash",
 	elapsedMs: 41000, hardMs: 1800000, turns: 7, tokens: { input: 1234, output: 567 },
-	openTools: ["bash"], feedLines: ["+12s ▶ read config.ts", "+20s ✓ read (84ms)", "+31s ▶ edit index.ts", "+38s ▶ bash npm test"],
+	openTools: ["bash"], feedLines: renderFeedEvents(stripFeed.events, { startMs: stripFeed.startMs }),
 };
 for (const w of [80, 62]) png("S4-inline-strip@" + w, render(new RunningView({ theme, keybindings, state: () => runningState, done: () => {} }), w));
 png("S4-inline-strip@20", render(new RunningView({ theme, keybindings, state: () => ({ ...runningState, feedLines: [] }), done: () => {} }), 20));
 
 // S6 peek — fixed-height overlay (real PeekView)
+
 const peekLines = [];
 for (let i = 0; i < 14; i++) peekLines.push(`+${i * 3}s ${i % 3 === 0 ? "▶" : i % 3 === 1 ? "✓" : "·"} ${i % 2 ? "bash npm test" : "read src/index.ts"}`);
 png("S6-peek", render(new PeekView({ theme, keybindings, state: () => ({ title: "abcdef0123456789 · general · glm-5.3 · running", summary: "~/.pi/agent/delegate/runs/run-abc/transcript.jsonl", lines: peekLines, live: true }), done: () => {} }), 80));
