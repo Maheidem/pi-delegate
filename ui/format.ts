@@ -1,16 +1,41 @@
 /**
- * delegate — shared formatting (reuse mandate, FIELDS.md §2).
+ * canonical kit formatting primitive (v1) — vendored byte-identical;
+ * consumers: extensions/ui/format.ts; guard: scripts/check-vendored.mjs
  *
  * ONE module all views import so tokens/durations/sizes/model render
- * identically across home, live strip, inline tool card, and peek. Wraps the
- * canonical `formatDuration` (config.ts) rather than re-rolling it. Replaces
- * the duplicate `fmtDuration`/`fmtTokens` that used to live in running-view.
+ * identically across home, live strip, inline tool card, and peek.
+ *
+ * This kit copy is deliberately SELF-CONTAINED (zero imports): the canonical
+ * `formatDuration` is inlined verbatim from the delegate `config.ts` so a
+ * generated panel can vendor the whole primitive without importing
+ * `../config.ts`. Consumers re-export it (`export { formatDuration }`) to
+ * keep the historical public surface of `ui/format.ts` unchanged. The
+ * delegate keeps its own `formatDuration` in `config.ts` for existing
+ * importers; both copies descend from the same code and must stay
+ * behaviorally identical — locked by
+ * `custom-extensions/delegate/tests/format.test.ts`.
+ *
+ * Registered vendored target: `custom-extensions/delegate/ui/format.ts`
+ * (`required: true`). Never hand-edit a vendored copy: edit this canonical
+ * source, then `node scripts/check-vendored.mjs --fix`.
  */
 
-import { formatDuration } from "../config.ts";
-
-/** Canonical duration (ms → "41s"/"30m 22s"/"2h"). */
-export { formatDuration };
+/** Human-readable duration for TUI display and prefilled inputs. */
+function formatDuration(ms: number): string {
+	if (!Number.isFinite(ms) || ms < 0) return "?";
+	if (ms < 1_000) return `${Math.round(ms)}ms`;
+	const totalSec = Math.round(ms / 1_000);
+	if (totalSec < 60) return `${totalSec}s`;
+	const m = Math.floor(totalSec / 60);
+	const s = totalSec % 60;
+	if (m < 60) return s ? `${m}m ${s}s` : `${m}m`;
+	const h = Math.floor(m / 60);
+	const remM = m % 60;
+	if (h < 24) return remM ? `${h}h ${remM}m` : `${h}h`;
+	const d = Math.floor(h / 24);
+	const remH = h % 24;
+	return remH ? `${d}d ${remH}h` : `${d}d`;
+}
 
 /** Token count: 0 if falsy; raw <1000; else `X.Yk`; else `X.YM`. */
 export function formatTokens(n: number | undefined): string {
@@ -90,3 +115,6 @@ export function progressBar(frac: number, width: number): string {
 	const filled = Math.round(f * w);
 	return `${"█".repeat(filled)}${"░".repeat(Math.max(0, w - filled))} ${Math.round(f * 100)}%`;
 }
+
+/** Canonical duration (ms → "41s"/"30m 22s"/"2h"). */
+export { formatDuration };
