@@ -960,6 +960,14 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			title: "Delegation",
 			summaryLines,
 			sections,
+			shortcuts: [
+				{ key: "r", label: "run", action: "run-general" },
+				{ key: "p", label: "peek", action: "peek" },
+				{ key: "x", label: "cancel", action: "cancel" },
+				{ key: "c", label: "configure", action: "configure-advanced" },
+				{ key: "d", label: "doctor", action: "doctor" },
+				{ key: "s", label: "status", action: "status" },
+			],
 			detailLines: active
 				? ["live refresh 1s · enter selects · peek / cancel in Actions"]
 				: ["enter selects · edit a timeout, or run a task"],
@@ -1051,6 +1059,10 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			}
 			if (action === "doctor") {
 				say(ctx, doctorText());
+				continue;
+			}
+			if (action === "status") {
+				say(ctx, statusText(ctx));
 				continue;
 			}
 			if (action === "paths") {

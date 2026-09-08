@@ -1,0 +1,77 @@
+{
+  "screenMapVersion": 1,
+  "extension": "@maheidem/pi-delegate",
+  "version": "0.3.0",
+  "capturedAt": "2026-09-08",
+  "terminal": "tmux 94x30, Menlo 18, true-color (capture-pane -e)",
+  "model": "local-mac / oMLX Qwen3.8-27B (live); deterministic frames use scripted fake state",
+  "mechanisms": {
+    "deterministic": "capture/capture-deterministic.mjs renders the REAL vendored SettingsPanel, RunningView, PeekView and the delegate tool's renderResult with a scripted fake-state timeline and a deterministic ANSI theme; no model, reproducible.",
+    "live": "capture/capture-isolated.sh runs a REAL pi in an isolated PI_CODING_AGENT_DIR (published delegate stripped) with the dev source loaded project-locally, drives the screens in tmux, captures true-color. Does not touch the live install.",
+    "session-export": "real-session.html via `pi --export` of a real delegating child session (type session v3)."
+  },
+  "screens": {
+    "S1-home": {
+      "files": ["shots/S1-home@80.png", "shots/S1-home@62.png", "shots/S1-home@20.png", "shots/S1-home-live.png"],
+      "surface": "home dashboard (vendored SettingsPanel)",
+      "mustShow": "title 'Delegation'; health summary (version·mode, active/idle, last); Actions incl. Run general/research, Peek, Cancel (disabled when idle), Resume, strict toggle, 'Configure advanced… ›', Doctor, Paths; base Timeouts (user hard/idle, project); shortcut footer; borders intact at 80/62/20; no input-bar smear."
+    },
+    "S2-home-live": {
+      "files": ["shots/S2-home-live@80.png", "shots/S2-home-live@62.png", "shots/S2-home-live@20.png"],
+      "surface": "home dashboard LIVE block (refresh)",
+      "mustShow": "Live section: Phase (accent) · shortModel; fixed progress bar % of hard; Tokens ↑in ↓out (primary) · $cost (muted, secondary); In flight tool; tail event; Cancel enabled while active."
+    },
+    "S4-inline-strip": {
+      "files": ["shots/S4-inline-strip@80.png", "shots/S4-inline-strip@62.png", "shots/S4-inline-strip@20.png"],
+      "surface": "slash composer inline execution strip (RunningView)",
+      "mustShow": "FIXED height (no height change between frames); header role·shortModel·elapsed·turn·↑↓tokens; progress bar; in-flight (warning); ≥1 feed line; 'esc/q cancel (press twice)' footer; borders valid incl. width 20; color inner-text only."
+    },
+    "S6-peek": {
+      "files": ["shots/S6-peek.png", "shots/S6-peek-live.png"],
+      "surface": "detailed peek overlay (PeekView)",
+      "mustShow": "overlay fixed 20 rows; full model id in header; scrollable event feed with +Ns relative stamps; live/final mode label; 'q close'; returns to home/dashboard."
+    },
+    "S7-advanced": {
+      "files": ["shots/S7-advanced@80.png", "shots/S7-advanced@62.png", "shots/S7-advanced@20.png"],
+      "surface": "secondary advanced config (vendored SettingsPanel)",
+      "mustShow": "knobs: queueLimit, stuck-tool watchdog, kill grace, handoff grace/enforce, max task/result bytes, default role (info); editable inputs right-aligned; opened from 'Configure advanced…'; esc returns home."
+    },
+    "S8-cancel-confirm": {
+      "files": ["shots/S8-cancel-confirm.png", "shots/S8-cancel-confirm-live.png"],
+      "surface": "destructive cancel confirmation",
+      "mustShow": "framed confirm: question 'Cancel active run?'; consequence line (SIGTERM→SIGKILL, partial handoff); Yes/No choice highlighted (not color-alone); default not destructive-accidental."
+    },
+    "S9-doctor": {
+      "files": ["shots/S9-doctor.png", "shots/S9-doctor-live.png"],
+      "surface": "doctor report (headless-reachable via slash)",
+      "mustShow": "diagnostic checks with ✓/⚠/✗ glyph+word (never color-alone): node, child-mode, store, config timeouts (hard/idle/stuck), model server reachability, recent runs, handoff mode."
+    },
+    "S9-paths": {
+      "files": ["shots/S9-paths.png", "shots/S9-paths-live.png"],
+      "surface": "paths report (headless-reachable via slash)",
+      "mustShow": "config path, runs dir, sessions dir, last run + transcript paths."
+    },
+    "S5-toolpath": {
+      "files": ["shots/toolpath-during.png", "shots/toolpath-done.png", "shots/toolpath-cancelled.png"],
+      "surface": "MODEL path — delegate tool renderCall/renderResult (the reported-broken surface)",
+      "mustShow": "during: live strip with in-flight + tail; done: neutral card '✓ done' with ↑↓tokens · $cost · shortModel; cancelled: '⊘ cancelled' (NOT a bare 'error:') with partial-handoff tail + resume hint; timeout would render 'timeout · idle/hard' warning. Proves the model path no longer emits bare error:."
+    },
+    "demo.gif": {
+      "files": ["demo.gif"],
+      "surface": "live motion",
+      "mustShow": "ordered live sequence: home dashboard → run → inline strip frames (feed filling) → peek → cancel-confirm."
+    },
+    "real-session.html": {
+      "files": ["real-session.html"],
+      "surface": "durable real delegating session (pi --export)",
+      "mustShow": "Pi's own HTML export of a real child session that delegated: tool calls, handoff, final result."
+    }
+  },
+  "invariants": {
+    "widths": "every render(width) line visibleWidth ≤ width at 80/62/20; borders valid at width 1",
+    "fixed-height": "RunningView 9 rows and PeekView 20 rows never change between refreshes (no composer/input-bar smear)",
+    "never-color-alone": "every state shown as glyph+word",
+    "timers": "refresh timers cleared on overlay close and session_shutdown",
+    "destructive": "cancel and strict-toggle require confirmation"
+  }
+}

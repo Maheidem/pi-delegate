@@ -45,6 +45,38 @@ is performed by this package.
 
 Any unrecognized first word is shorthand for `run general …`.
 
+### Terminal UI (v0.3.0)
+
+One centralized experience built on the vendored canonical `SettingsPanel`
+(never a bespoke panel). Everything reachable from the panel is also reachable
+as a nested command and from headless stdout — the same application method.
+
+- **Home dashboard** (`/delegate`, TUI) — health summary (version · mode,
+  active/idle, last run) + **Actions** (Run general/research, Peek, Cancel,
+  Resume, strict toggle, `Configure advanced… ›`, Doctor, Paths) + base
+  **Timeouts** (user & project). Keys: `↑↓/jk` move, `enter` select, `esc/q`
+  close; shortcuts `r run · p peek · x cancel · c configure · d doctor · s status`.
+- **Live dashboard** — while a run is active the home panel mirrors it live
+  (`refresh` 1 s): phase · short model · fixed progress bar · tokens
+  `↑in ↓out` (primary) · `$cost` (secondary, dim) · in-flight tools · tail.
+- **Inline execution (both paths).** Slash path shows a fixed-height strip
+  above the composer (`RunningView`) with progress, in-flight and a feed; the
+  model path renders the same liveness through the tool's `renderCall` /
+  `renderResult`. Terminal results render as a neutral card — `✓ done`,
+  `⊘ cancelled`, `⏱ timeout · idle/hard`, `✗ failed` — glyph+word (never a
+  bare `error:`), tokens primary, with a partial-handoff tail + resume hint
+  on cancel/timeout.
+- **Peek** (`/delegate peek [runId]`) — detailed fixed-height overlay
+  (`PeekView`, full model id, relative-stamped event feed); `q` returns home.
+- **Advanced config** (`Configure advanced… ›`) — queue limit, stuck-tool
+  watchdog, kill/handoff grace/enforce, max task/result bytes, default role —
+  edited through the same generic `patchConfig`; `esc` returns home.
+- **Destructive actions** (cancel, strict on/off) require confirmation.
+
+Headless (`pi -p` / child mode) prints the same status/doctor/paths text, so
+panel ≡ command ≡ headless. Screens with pixel evidence live in
+`.planning/ui-redesign-2026-09-04/evidence/` (see `manifest.json`).
+
 ### Timeouts
 
 Three levels, highest priority first:
