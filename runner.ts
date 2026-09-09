@@ -27,6 +27,7 @@ import { classifyRpcRecord, RpcJsonlParser, type RpcRecord } from "./rpc-jsonl.t
 import { appendTranscriptRecord, updateRunMetadata, type OpenedRun } from "./run-store.ts";
 import { formatDuration } from "./config.ts";
 import { renderHandoff, validateHandoffSubmission, type HandoffSubmission } from "./handoff.ts";
+import { writeAskAnswerFile } from "./ask.ts";
 import type { FeedEvent } from "./transcript-feed.ts";
 
 export interface RunnerConfig {
@@ -89,6 +90,13 @@ export interface RunnerSpawnRequest {
 	sessionPath?: string;
 	/** R3: directory the child's session file is persisted to (new runs). */
 	sessionDir?: string;
+	/** R8: this is a background run (ask_parent channel + markers in env). */
+	background?: boolean;
+	/** R17: answers directory for ask_parent questions ($PI_DELEGATE_ASK_DIR). */
+	askDir?: string;
+	/** R17: ask budget (env to the child; 0/undefined disables ask_parent). */
+	askTimeoutMs?: number;
+	askMaxQuestions?: number;
 }
 
 export function buildChildArgs(
@@ -96,8 +104,10 @@ export function buildChildArgs(
 	role: DelegateRole,
 ): { args: string[]; env: NodeJS.ProcessEnv; promptId: string } {
 	// The mandatory structured-handoff tool is always in the child's
-	// ceiling; the delegate extension registers it in child mode.
-	const toolList = [...role.tools, "handoff"].join(",");
+	// ceiling; the delegate extension registers it in child mode. Background
+	// children (R17/R18) also get ask_parent when the ask channel is enabled.
+	const askEnabled = Boolean(req.background && req.askDir && req.askTimeoutMs && req.askTimeoutMs > 0);
+	const toolList = [...role.tools, "handoff", ...(askEnabled ? ["ask_parent"] : [])].join(",");
 	// R3: the child's session is DURABLE. New runs persist it under the run
 	// store (--session-dir); resumed runs re-enter the prior session file
 	// directly (--session <file>) so a killed run can be continued in the
@@ -120,17 +130,32 @@ export function buildChildArgs(
 		PI_DELEGATE_CHILD: "1",
 		PI_DELEGATE_RUN_ID: req.runId,
 		PI_DELEGATE_PARENT_PID: String(process.pid),
+		...(askEnabled
+			? {
+				PI_DELEGATE_BACKGROUND: "1",
+				PI_DELEGATE_ASK_DIR: req.askDir,
+				PI_DELEGATE_ASK_TIMEOUT_MS: String(req.askTimeoutMs),
+				PI_DELEGATE_ASK_MAX: String(req.askMaxQuestions ?? 5),
+			}
+			: {}),
 	};
 	return { args, env, promptId: `delegate:${req.runId}:prompt` };
 }
 
-function buildPromptMessage(runId: string, role: string, task: string, resumeOf?: string): string {
+function buildPromptMessage(runId: string, role: string, task: string, resumeOf?: string, background?: boolean): string {
 	const resumeNote = resumeOf
 		? `You are RESUMING the child session of run ${resumeOf} (its earlier turns are in your context). Continue from where that run left off.\n`
+		: "";
+	const askContract = background
+		? `You have an ask_parent channel to the parent agent:\n` +
+		  `- ask_parent(kind="question") BLOCKS until the parent answers (or the budget expires — then proceed with your best judgment and state the assumption in your handoff).\n` +
+		  `- ask_parent(kind="note") files a non-blocking note (risks, observations, concerns) and never stalls your run.\n` +
+		  `- Ask ONLY when you are genuinely blocked or a wrong guess is expensive; for cheap decisions proceed with a stated assumption.\n\n`
 		: "";
 	return (
 		`[delegated child run · id=${runId} · role=${role}]\n` +
 		resumeNote +
+		askContract +
 		`This task came from a parent Pi session. Work only on this task.\n` +
 		`Do not delegate or attempt to contact the parent during execution.\n` +
 		`Follow the role output contract exactly.\n\n` +
@@ -243,6 +268,8 @@ export class DelegateRunner {
 	private lastAssistant: AssistantFinal | null = null;
 	/** R1: toolCallIds with a start but no matching end yet. */
 	private openToolCalls = new Set<string>();
+	/** R17: open ask_parent questions (watchdog-suspended while non-empty). */
+	private askOpenIds = new Set<string>();
 	/** Feed: toolCallId → start ms (for end-event durations). */
 	private toolStartedAt = new Map<string, number>();
 	/** Feed: toolCallId → tool name. */
@@ -410,7 +437,7 @@ export class DelegateRunner {
 		child.stdin?.on("error", () => {});
 
 		// Send the single prompt over RPC stdin.
-		const promptMessage = buildPromptMessage(this.runId, role.name, this.req.task, this.req.resumeOf);
+		const promptMessage = buildPromptMessage(this.runId, role.name, this.req.task, this.req.resumeOf, this.req.background);
 		const promptRecord = JSON.stringify({ id: this.promptId, type: "prompt", message: promptMessage });
 		try {
 			child.stdin?.write(`${promptRecord}\n`);
@@ -452,6 +479,14 @@ export class DelegateRunner {
 	 * still hits the normal inactivity budget. */
 	private armInactivity(): void {
 		if (this.finalizing || !this.child) return;
+		// R17: an open ask_parent question suspends the idle/stuck watchdogs —
+		// the child is legitimately blocked on the parent; only the hard cap
+		// still applies (armInactivity simply doesn't re-arm).
+		if (this.askOpenIds.size > 0) {
+			if (this.inactivityTimer) clearTimeout(this.inactivityTimer);
+			this.inactivityTimer = null;
+			return;
+		}
 		if (this.inactivityTimer) clearTimeout(this.inactivityTimer);
 		const budget = this.openToolCalls.size > 0
 			? this.cfg.stuckToolTimeoutMs ?? this.cfg.hardTimeoutMs
@@ -543,6 +578,27 @@ export class DelegateRunner {
 						this.toolStartedAt.delete(cls.id);
 						this.toolNames.delete(cls.id);
 						this.toolDetails.delete(cls.id);
+					}
+					// R17: ask_parent channel — fire the hook and (for questions)
+					// suspend the watchdogs while the child waits for the parent.
+					if (cls.toolName === "ask_parent") {
+						if (cls.phase === "start") {
+							const kind = cls.args?.kind === "note" ? "note" : "question";
+							if (kind === "question") this.askOpenIds.add(cls.id);
+							this.hooks.onAsk?.({
+								runId: this.runId,
+								phase: "start",
+								kind,
+								topic: typeof cls.args?.topic === "string" ? cls.args.topic : "",
+								text: typeof (cls.args?.text ?? cls.args?.question ?? cls.args?.note) === "string"
+									? String(cls.args?.text ?? cls.args?.question ?? cls.args?.note)
+									: "",
+								toolCallId: cls.id,
+							});
+						} else if (cls.phase === "end") {
+							const wasOpen = this.askOpenIds.delete(cls.id);
+							this.hooks.onAsk?.({ runId: this.runId, phase: "end", kind: wasOpen ? "question" : "note", topic: "", text: "", toolCallId: cls.id });
+						}
 					}
 					// a tool event resets the watchdog to the right budget
 					this.armInactivity();
@@ -676,6 +732,15 @@ export class DelegateRunner {
 		} catch (error) {
 			return { ok: false, error: `could not write steering message: ${(error as Error).message}` };
 		}
+	}
+
+	/**
+	 * R17: write the parent's answer for a pending ask_parent question. The
+	 * blocked child's execute() resolves the moment this file appears.
+	 */
+	writeAskAnswer(toolCallId: string, payload: { answeredBy: "model" | "user"; answeredAt: string; answer: string }): void {
+		if (!this.req.askDir) throw new Error(`run ${this.runId} has no ask directory.`);
+		writeAskAnswerFile(this.req.askDir, toolCallId, payload);
 	}
 
 	cancel(state: RunTerminalState): void {

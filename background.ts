@@ -27,6 +27,8 @@ import type {
 } from "./types.ts";
 import { isTerminalRunState } from "./types.ts";
 import { isPidAlive, readRunMetadata } from "./run-store.ts";
+import { CHILD_NOTE_TYPE, CHILD_QUESTION_TYPE } from "./ask.ts";
+export { CHILD_NOTE_TYPE, CHILD_QUESTION_TYPE };
 
 /** R11: ledger custom-entry type (session JSONL). */
 export const BACKGROUND_LEDGER_TYPE = "delegate.background";
@@ -152,6 +154,33 @@ export function formatBackgroundStartedText(runId: string, role: RoleName, descr
 	);
 }
 
+/** R17: the question envelope (SPEC §5, byte-exact; wakes the parent). */
+export function formatChildQuestionEnvelope(runId: string, role: RoleName, description: string, topic: string, question: string): string {
+	return (
+		`[delegate background ${runId} · ${role} · ${description}: asks]\n` +
+		"\n" +
+		`A delegated child is blocked waiting for your answer (topic: ${topic}). Answer\n` +
+		`with the delegate_answer tool: delegate_answer({ runId: "${runId}", answer: "…" }).\n` +
+		"Be terse and directive; the child resumes the moment your answer lands. Do not\n" +
+		"narrate this exchange to the user unless it is material. If you cannot answer,\n" +
+		"say so — the child proceeds with its best judgment after the ask budget expires.\n" +
+		"\n" +
+		question
+	);
+}
+
+/** R18: the note envelope (SPEC §5, byte-exact; NEVER wakes the parent). */
+export function formatChildNoteEnvelope(runId: string, role: RoleName, description: string, topic: string, note: string): string {
+	return (
+		`[delegate background ${runId} · ${role} · ${description}: note]\n` +
+		"\n" +
+		`A delegated child filed a non-blocking note (topic: ${topic}). No answer is\n` +
+		"expected or possible. Treat it as an internal work event.\n" +
+		"\n" +
+		note
+	);
+}
+
 /** R12: rebuild a DelegateRunResult from a receipt (replay/reconcile path). */
 export function receiptToRunResult(metadata: RunMetadataV1): DelegateRunResult {
 	const ok = metadata.state === "succeeded";
@@ -229,6 +258,8 @@ export class BackgroundManager {
 	#paused = false;
 	#deliveryTail: Promise<void> = Promise.resolve();
 	#pendingFlush: Array<() => void> = [];
+	/** R17: runId → pending ask (one live question per run). */
+	readonly #pendingAsks = new Map<string, { toolCallId: string; topic: string; askedAt: string }>();
 	/** runIds with a created entry on the currently active branch. */
 	#branchOwned = new Set<string>();
 	/** Latest branch snapshot (for dedup scans between refreshes). */
@@ -490,6 +521,96 @@ export class BackgroundManager {
 			display: true,
 			details: { runId, role, state: result.details.state, description, kind: "result" },
 		});
+	}
+
+	// ── R17/R18: ask channel ─────────────────────────────────────────────
+
+	/** Fired by the runner hook for every ask_parent start/end (M4). */
+	onAsk(ask: {
+		runId: string;
+		phase: "start" | "end";
+		kind: "question" | "note";
+		topic: string;
+		text: string;
+		toolCallId: string;
+	}): void {
+		const run = this.#runs.get(ask.runId);
+		if (!run) return;
+		if (run.generation !== this.#generation) return; // stale session: no delivery
+		if (ask.phase === "end") {
+			const pending = this.#pendingAsks.get(ask.runId);
+			if (pending?.toolCallId === ask.toolCallId) this.#pendingAsks.delete(ask.runId);
+			return;
+		}
+		if (ask.kind === "note") {
+			this.deliverNote(run, ask);
+			return;
+		}
+		// question: wake the parent (a blocked child is material); register pending.
+		const superseded = this.#pendingAsks.get(ask.runId);
+		if (superseded) this.#pendingAsks.delete(ask.runId);
+		this.#pendingAsks.set(ask.runId, { toolCallId: ask.toolCallId, topic: ask.topic, askedAt: new Date().toISOString() });
+		this.enqueueAskMessage({
+			customType: CHILD_QUESTION_TYPE,
+			content: formatChildQuestionEnvelope(ask.runId, run.handle.role, run.handle.description, ask.topic, ask.text),
+			display: true,
+			details: { runId: ask.runId, toolCallId: ask.toolCallId, role: run.handle.role, description: run.handle.description, topic: ask.topic, kind: "question" },
+			triggerTurn: true,
+		});
+	}
+
+	private deliverNote(run: ManagedRun, ask: { topic: string; text: string; toolCallId: string }): void {
+		this.enqueueAskMessage({
+			customType: CHILD_NOTE_TYPE,
+			content: formatChildNoteEnvelope(run.handle.runId, run.handle.role, run.handle.description, ask.topic, ask.text),
+			display: true,
+			details: { runId: run.handle.runId, role: run.handle.role, description: run.handle.description, topic: ask.topic, kind: "note" },
+			triggerTurn: false,
+		});
+	}
+
+	/** Notes and questions share the serialized tail; notes never wake. */
+	private enqueueAskMessage(message: {
+		customType: string;
+		content: string;
+		display: true;
+		details: Record<string, unknown>;
+		triggerTurn: boolean;
+	}): void {
+		const send = () => {
+			this.#deliveryTail = this.#deliveryTail.catch(() => undefined).then(() => {
+				this.#ports.sendMessage(message, { deliverAs: "steer", triggerTurn: message.triggerTurn });
+			});
+		};
+		if (this.#paused) this.#pendingFlush.push(send);
+		else send();
+	}
+
+	/** R17: route a delegate_answer call to the blocked child. */
+	answer(runId: string, answerText: string, answeredBy: "model" | "user"): { ok: true } | { ok: false; error: string } {
+		const run = this.#runs.get(runId);
+		if (!run) {
+			return { ok: false, error: `unknown or expired background run ${runId}.` };
+		}
+		const pending = this.#pendingAsks.get(runId);
+		if (!pending) {
+			return { ok: false, error: `background run ${runId} has no pending question (it may have timed out or already been answered).` };
+		}
+		if (!run.handle.writeAnswer) {
+			return { ok: false, error: `background run ${runId} does not support answering.` };
+		}
+		try {
+			run.handle.writeAnswer(pending.toolCallId, { answeredBy, answeredAt: new Date().toISOString(), answer: answerText });
+			this.#pendingAsks.delete(runId);
+			return { ok: true };
+		} catch (error) {
+			return { ok: false, error: `could not deliver the answer: ${(error as Error).message}` };
+		}
+	}
+
+	/** R14/R19: pending questions for status surfaces. */
+	pendingQuestions(): Array<{ runId: string; topic: string; askedAt: string }> {
+		return [...this.#pendingAsks.entries()].map(([runId, p]) => ({ runId, topic: p.topic, askedAt: p.askedAt }));
 	}
 
 	// ── Introspection (status surface, R14 lands in M2) ───────────────────

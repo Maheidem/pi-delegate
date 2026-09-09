@@ -877,6 +877,175 @@ async function main() {
 		}
 	}
 
+	// ── Scenario O: ask round-trip — child asks, parent model answers ──
+	{
+		if (runScenario("O")) {
+		const dir = makeWorkspace();
+		const sessionFile = path.join(dir, "e2e-session.jsonl");
+		const pi = startPi(dir, { session: sessionFile });
+		await pi.prompt(
+				"Call the delegate tool ONCE with background=true, task='FIRST call the ask_parent tool with kind=question, topic=blocked, text=\"Should the marker file contain ALPHA or BETA?\" — you are blocked until its result arrives. Then create marker-ask.txt containing exactly the word the parent's answer chose, verify it, and finish.' description='Ask parent test run'. The call returns immediately; reply with exactly: SPAWNED.",
+				300_000,
+			);
+		const question = await waitFor(
+				() => {
+				const entries = readSessionEntries(sessionFile);
+				return entries.find(
+						(e) => e.type === "custom_message" && e.customType === "delegate-child-question",
+					) ?? null;
+				},
+			240_000,
+				"child question",
+			);
+		ok(!!question, "O: child question message delivered");
+		const qRunId = question?.details?.runId;
+		ok(!!qRunId, "O: question carries runId");
+		ok(String(question?.content ?? "").includes("blocked waiting for your answer"), "O: question envelope present");
+		if (qRunId) {
+			// The question's triggerTurn WAKES the parent — the parent model is
+			// instructed by the envelope to answer on its own. Observe that (the
+			// strong proof); the harness answer is only a fallback if the wake
+			// stays silent (never race the model with a scripted answer).
+			const answeredOnItsOwn = await waitFor(
+				() => {
+					const receipt = readReceipt(qRunId);
+					if (!receipt?.transcriptPath || !fs.existsSync(receipt.transcriptPath)) return null;
+					return fs.readFileSync(receipt.transcriptPath, "utf8").includes("[parent answered") ? receipt : null;
+				},
+				90_000,
+				"autonomous answer",
+			);
+			if (!answeredOnItsOwn) {
+				await pi.prompt(
+					`A delegated child is blocked on your answer. Call the delegate_answer tool now with runId="${qRunId}" and answer="BETA". Reply with exactly: ANSWERED.`,
+					180_000,
+				);
+			}
+			ok(!!answeredOnItsOwn || /Answer delivered/.test(pi.allText()), "O: the question was answered (autonomously or via harness)");
+			const done = await waitFor(
+				() => {
+					const entries = readSessionEntries(sessionFile);
+					return entries.find(
+						(e) => e.type === "custom_message" && e.customType === "delegate-background-result" && e.details?.runId === qRunId,
+					) ?? null;
+				},
+				420_000,
+				"terminal after answer",
+			);
+			ok(done?.details?.state === "succeeded", `O: asked run succeeded (got ${done?.details?.state})`);
+			const marker = fs.readFileSync(path.join(dir, "marker-ask.txt"), "utf8");
+			ok(/ALPHA|BETA/.test(marker), `O: child used the parent's answer (marker-ask.txt = ${marker.trim()})`);
+			const receipt = readReceipt(qRunId);
+			ok(
+				!!receipt?.transcriptPath && fs.existsSync(receipt.transcriptPath) &&
+					fs.readFileSync(receipt.transcriptPath, "utf8").includes("[parent answered"),
+				"O: ask toolResult proves the answer reached the child ([parent answered])",
+			);
+			// Forensics: the answer toolCall is in the parent session JSONL.
+			const entries = readSessionEntries(sessionFile);
+			ok(entries.some((e) => JSON.stringify(e).includes(`"${qRunId}"`) && JSON.stringify(e).includes("delegate_answer")), "O: delegate_answer toolCall persisted in session");
+		}
+		await stop(pi);
+		}
+	}
+
+	// ── Scenario P: ask timeout — child falls back, run survives ─────────
+	{
+		if (runScenario("P")) {
+		const dir = makeWorkspace();
+		fs.mkdirSync(path.join(dir, ".pi", "delegate"), { recursive: true });
+		fs.writeFileSync(
+				path.join(dir, ".pi", "delegate", "config.json"),
+			JSON.stringify({ askParent: { timeoutMs: 30_000 } }),
+		);
+		const sessionFile = path.join(dir, "e2e-session.jsonl");
+		const pi = startPi(dir, { session: sessionFile });
+		await pi.prompt(
+				"Call the delegate tool ONCE with background=true, task='FIRST call the ask_parent tool with kind=question, topic=guidance, text=A blocker question that will not be answered? Take whatever the tool returns as final: if it says no answer arrived, proceed with your best judgment. Then create marker-timeout.txt containing exactly the word FELLBACK, verify it, and finish.' description='Ask timeout test run'. IMPORTANT: after spawning, if a delegate-child-question message arrives during this session, do NOT call delegate_answer — ignore it completely. Reply with exactly: SPAWNED.",
+				300_000,
+			);
+		const question = await waitFor(
+				() => {
+				const entries = readSessionEntries(sessionFile);
+				return entries.find((e) => e.type === "custom_message" && e.customType === "delegate-child-question") ?? null;
+				},
+			240_000,
+				"child question (unanswered)",
+			);
+		ok(!!question, "P: question delivered (and left unanswered)");
+		const pRunId = question?.details?.runId;
+		if (pRunId) {
+			const done = await waitFor(
+					() => {
+					const entries = readSessionEntries(sessionFile);
+					return entries.find(
+							(e) => e.type === "custom_message" && e.customType === "delegate-background-result" && e.details?.runId === pRunId,
+						) ?? null;
+					},
+				480_000,
+					"terminal after timeout",
+				);
+			ok(done?.details?.state === "succeeded", `P: run survived the unanswered ask (got ${done?.details?.state})`);
+			ok(fs.readFileSync(path.join(dir, "marker-timeout.txt"), "utf8").includes("FELLBACK"), "P: child proceeded with best judgment (marker-timeout.txt)");
+				// Forensics: the exact fallback text is in the child's transcript.
+			const receipt = await awaitReceipt((m) => m.runId === pRunId, 60_000);
+			ok(!!receipt, "P: receipt found");
+				if (receipt?.transcriptPath && fs.existsSync(receipt.transcriptPath)) {
+					const transcript = fs.readFileSync(receipt.transcriptPath, "utf8");
+				ok(transcript.includes("No answer arrived within the budget"), "P: timeout fallback text captured in child transcript");
+				}
+			}
+		await stop(pi);
+		}
+	}
+
+	// ── Scenario Q: strict mode + background ask + answer stays usable ──
+	{
+		if (runScenario("Q")) {
+		const dir = makeWorkspace();
+		const sessionFile = path.join(dir, "e2e-session.jsonl");
+		const pi = startPi(dir, { session: sessionFile });
+		await pi.prompt("/delegate on", 60_000);
+		await pi.prompt("/delegate status", 60_000);
+		const strictStatus = pi.allText();
+		ok(/mode: strict/.test(strictStatus), "Q: strict mode enabled");
+		await pi.prompt(
+				"While in strict delegation mode, call the delegate tool ONCE with background=true, task='FIRST call ask_parent with kind=question, topic=approval, text=Approve writing the file? After its result, create strict-ask.txt containing APPROVED and finish.' description='Strict ask test run'. Reply with exactly: SPAWNED.",
+				300_000,
+		);
+		const question = await waitFor(
+				() => {
+					const entries = readSessionEntries(sessionFile);
+					return entries.find((e) => e.type === "custom_message" && e.customType === "delegate-child-question") ?? null;
+				},
+			240_000,
+				"strict child question",
+			);
+		ok(!!question, "Q: question delivered under strict mode");
+		const qRunId = question?.details?.runId;
+		if (qRunId) {
+			await pi.prompt(
+					`Answer the blocked child now: call delegate_answer with runId="${qRunId}" and answer="Yes, approved.". Reply with exactly: ANSWERED.`,
+				180_000,
+			);
+			ok(/Answer delivered/.test(pi.allText()), "Q: delegate_answer works in strict mode");
+			const done = await waitFor(
+					() => {
+					const entries = readSessionEntries(sessionFile);
+					return entries.find(
+							(e) => e.type === "custom_message" && e.customType === "delegate-background-result" && e.details?.runId === qRunId,
+						) ?? null;
+					},
+				420_000,
+					"strict terminal",
+				);
+			ok(done?.details?.state === "succeeded", `Q: strict-mode asked run succeeded (got ${done?.details?.state})`);
+			ok(fs.readFileSync(path.join(dir, "strict-ask.txt"), "utf8").includes("APPROVED"), "Q: child used the strict-mode answer");
+		}
+		await stop(pi);
+		}
+	}
+
 	console.log(`\nE2E checks: ${checks - fails.length}/${checks}`);
 	if (fails.length) {
 		for (const f of fails) console.error(`FAILED: ${f}`);

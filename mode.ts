@@ -17,8 +17,8 @@ import type {
 } from "./types.ts";
 import { DELEGATE_MODE_CUSTOM_TYPE } from "./types.ts";
 
-export const STRICT_ALLOWED_TOOLS = new Set(["delegate"]);
-export const STRICT_ACTIVE_TOOLS = ["delegate"];
+export const STRICT_ALLOWED_TOOLS = new Set(["delegate", "delegate_status", "delegate_send", "delegate_answer"]);
+export const STRICT_ACTIVE_TOOLS = ["delegate", "delegate_status", "delegate_send", "delegate_answer"];
 
 export const STRICT_OVERLAY = [
 	"[DELEGATION-MODE OVERLAY — enforced by the delegate extension]",

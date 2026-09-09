@@ -175,7 +175,7 @@ function modeCtx(overrides: Partial<ModeTransitionContext> = {}): ModeTransition
 		requestAbortConfirmation: async () => true,
 		abort: () => calls.push("abort"),
 		waitForIdle: async () => {},
-		getActiveTools: () => (calls.includes("setActiveTools:[delegate]") ? ["delegate"] : ["read", "bash"]),
+		getActiveTools: () => (calls.includes("setActiveTools:[delegate,delegate_status,delegate_send,delegate_answer]") ? ["delegate", "delegate_status", "delegate_send", "delegate_answer"] : ["read", "bash"]),
 		setActiveTools: (tools) => calls.push(`setActiveTools:[${tools.join(",")}]`),
 		persistModeEntry: () => calls.push("persist"),
 		setFooterStatus: () => {},
@@ -225,7 +225,7 @@ test("mode: enable pins active tools to delegate and persists", async () => {
 	const ctx = modeCtx();
 	const res = await enableStrict(rt, ctx);
 	assert.equal(res.ok, true);
-	assert.ok(ctx.calls.includes("setActiveTools:[delegate]"));
+	assert.ok(ctx.calls.includes("setActiveTools:[delegate,delegate_status,delegate_send,delegate_answer]"));
 	assert.ok(ctx.calls.includes("persist"));
 });
 

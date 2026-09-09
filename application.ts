@@ -355,11 +355,16 @@ export class DelegateApplicationImpl implements DelegateApplication {
 	/** R8: spawn a background run — same validation and spawn path as the
 	 * foreground, but no slot reservation, no queue, and the caller gets a
 	 * live handle instead of the terminal result. */
-	runBackground(request: DelegateRequest): { error: DelegateRunResult } | { handle: BackgroundRunHandle } {
+	runBackground(request: DelegateRequest, hooks: { onAsk?: RunHooks["onAsk"] } = {}): { error: DelegateRunResult } | { handle: BackgroundRunHandle } {
 		const prepared = this.prepareRun(request);
 		if ("error" in prepared) return { error: prepared.error };
 		const { opened, role, task, model, cfg, timeoutInfo, modelNote, resumeOf, sessionPath, sessionDir } = prepared;
 		const agentDir = this.ports.agentDir;
+		// R17: ask channel plumbing — answers dir + budget env for the child.
+		const askEnabled = this.liveConfig.askParent?.enabled !== false;
+		const askDir = askEnabled ? path.join(opened.paths.runsDir, "answers", opened.metadata.runId) : undefined;
+		const askTimeoutMs = askEnabled ? (this.liveConfig.askParent?.timeoutMs ?? 600_000) : undefined;
+		const askMaxQuestions = askEnabled ? (this.liveConfig.askParent?.maxPerRun ?? 5) : undefined;
 		// R14: capture the live stream for status/dashboard surfaces.
 		const ring = new FeedRing(120);
 		const streamEntry = { ring, latest: null as RunStreamUpdate | null };
@@ -378,6 +383,7 @@ export class DelegateApplicationImpl implements DelegateApplication {
 				...(resumeOf ? { resumeOf } : {}),
 				...(sessionPath ? { sessionPath } : {}),
 				...(sessionDir ? { sessionDir } : {}),
+				...(askDir && askTimeoutMs ? { background: true, askDir, askTimeoutMs, ...(askMaxQuestions ? { askMaxQuestions } : {}) } : {}),
 			},
 			cfg,
 			{
@@ -387,6 +393,7 @@ export class DelegateApplicationImpl implements DelegateApplication {
 				onEvent: (e: FeedEvent) => {
 					ring.push(e);
 			},
+				...(hooks.onAsk ? { onAsk: hooks.onAsk } : {}),
 			},
 			this.ports.resolveInvocation ?? resolvePiInvocation,
 		);
@@ -413,6 +420,12 @@ export class DelegateApplicationImpl implements DelegateApplication {
 				description: request.description ?? "",
 				cancel: (reason?: string) => runner.cancel((reason ?? "cancelled") as "cancelled"),
 				steer: (message: string) => runner.steer(message),
+				...(askDir
+					? {
+						writeAnswer: (toolCallId: string, payload: { answeredBy: "model" | "user"; answeredAt: string; answer: string }) =>
+							runner.writeAskAnswer(toolCallId, payload),
+					}
+					: {}),
 				completion,
 			},
 		};

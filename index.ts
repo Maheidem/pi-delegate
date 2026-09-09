@@ -25,9 +25,10 @@ import { formatDuration, loadConfig, parseDuration, saveConfig } from "./config.
 import * as fsSync from "node:fs";
 import { delegateVersion } from "./version.ts";
 import { HandoffToolParams, validateHandoffSubmission, type HandoffSubmission } from "./handoff.ts";
+import { CHILD_NOTE_TYPE, CHILD_QUESTION_TYPE, registerAskParentTool } from "./ask.ts";
 import { parseDelegateCommand, delegateCompletions, type DelegateIntent } from "./commands.ts";
 import { DELEGATE_ROLES, isRoleName, resolveRole } from "./roles.ts";
-import { STRICT_OVERLAY, syncStrictToolSet, resetBlockedCounters } from "./mode.ts";
+import { STRICT_OVERLAY, STRICT_ACTIVE_TOOLS, syncStrictToolSet, resetBlockedCounters } from "./mode.ts";
 import { DelegateApplicationImpl } from "./application.ts";
 import { DELEGATE_MODE_CUSTOM_TYPE } from "./types.ts";
 import type {
@@ -186,6 +187,17 @@ export default function delegateExtension(pi: ExtensionAPI) {
 	//    it registers ONLY the mandatory structured-handoff tool.
 	if (process.env.PI_DELEGATE_CHILD === "1") {
 		registerChildHandoffTool(pi);
+		// R17/R18: background children get the ask_parent channel (a
+		// foreground child asking would deadlock the parent turn by
+		// construction — enforced here at registration, not by prompt).
+		const askDir = process.env.PI_DELEGATE_ASK_DIR;
+		if (askDir) {
+			registerAskParentTool(pi, {
+				askDir,
+				timeoutMs: Number(process.env.PI_DELEGATE_ASK_TIMEOUT_MS) > 0 ? Number(process.env.PI_DELEGATE_ASK_TIMEOUT_MS) : 600_000,
+				maxQuestions: Number(process.env.PI_DELEGATE_ASK_MAX) > 0 ? Number(process.env.PI_DELEGATE_ASK_MAX) : 5,
+			});
+		}
 		return;
 	}
 	// 2. Construct state — no child, no timers at load time.
@@ -492,7 +504,9 @@ export default function delegateExtension(pi: ExtensionAPI) {
 					description: desc.value,
 				});
 				refreshDoctor(ctx);
-				const attempt = app.runBackground(request);
+				const attempt = app.runBackground(request, {
+					onAsk: (ask) => background.onAsk(ask),
+				});
 				if ("error" in attempt) {
 					return {
 						content: [{ type: "text" as const, text: formatRunText(attempt.error) }],
@@ -746,6 +760,83 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	// ── R17: delegate_answer tool (unblock a waiting child) ────────────────
+
+	pi.registerTool({
+		name: "delegate_answer",
+		label: "Answer child question",
+		description:
+			"Answer a delegated child's pending ask_parent question. The blocked child resumes the moment your answer lands. " +
+			"Be terse and directive; do not narrate the exchange to the user unless material. If you cannot answer, say so — the child falls back to its best judgment when the ask budget expires.",
+		promptSnippet: "Answer a delegated child's pending question",
+		promptGuidelines: [
+			"Answer pending child questions promptly with delegate_answer — the child is blocked until you do.",
+		],
+		parameters: Type.Object({
+			runId: Type.String({ description: "The runId from the delegate-child-question message." }),
+			answer: Type.String({ minLength: 1, maxLength: 2000, description: "Your answer, self-contained and directive. The child sees exactly this text." }),
+		}),
+		async execute(_toolCallId, params) {
+			const runId = typeof params.runId === "string" ? params.runId.trim() : "";
+			const answer = typeof params.answer === "string" ? params.answer.trim() : "";
+			if (!runId || !answer) {
+				return {
+					content: [{ type: "text" as const, text: "delegate_answer requires runId and answer." }],
+					details: {} as Record<string, unknown>,
+					isError: true,
+				};
+			}
+			const result = background.answer(runId, answer, "model");
+			if (!result.ok) {
+				return {
+					content: [{ type: "text" as const, text: `E_ANSWER_FAILED: ${result.error}` }],
+					details: { runId } as Record<string, unknown>,
+					isError: true,
+				};
+			}
+			return {
+				content: [{ type: "text" as const, text: `Answer delivered to background run ${runId}; the child is resuming.` }],
+				details: { runId, answered: true } as Record<string, unknown>,
+			};
+		},
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		renderCall(args: any, theme: any) {
+			const runId = typeof args.runId === "string" ? args.runId.slice(-12) : "?";
+			return renderToolCallCard(theme, { title: "delegate_answer", subject: "answer", qualifier: runId });
+		},
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		renderResult(result: any, theme: any) {
+			const text = (result.content ?? []).map((c: { text?: string }) => c.text ?? "").filter(Boolean).join("\n");
+			return renderToolPlainCard(text.split("\n")[0] ?? text);
+		},
+	});
+
+	// ── R15/R17/R18: question + note renderers (? asks / ℹ note) ──────────
+
+	pi.registerMessageRenderer(CHILD_QUESTION_TYPE, (message: { content?: string | unknown[]; details?: unknown }) => {
+		const d = (message.details ?? {}) as { runId?: string; description?: string; topic?: string };
+		const raw = message.content;
+		const text =
+			typeof raw === "string" ? raw
+			: Array.isArray(raw) ? raw.map((b) => (b as { text?: string })?.text ?? "").join("\n")
+			: "";
+		const parts = text.split("\n\n");
+		const body = parts.length > 2 ? parts.slice(2).join("\n\n") : text;
+		return new Text(`? background ${d.runId ?? "?"}${d.description ? ` · ${d.description}` : ""}: asks (${d.topic ?? "?"})\n\n${body}`, 0, 0);
+	});
+
+	pi.registerMessageRenderer(CHILD_NOTE_TYPE, (message: { content?: string | unknown[]; details?: unknown }) => {
+		const d = (message.details ?? {}) as { runId?: string; description?: string; topic?: string };
+		const raw = message.content;
+		const text =
+			typeof raw === "string" ? raw
+			: Array.isArray(raw) ? raw.map((b) => (b as { text?: string })?.text ?? "").join("\n")
+			: "";
+		const parts = text.split("\n\n");
+		const body = parts.length > 2 ? parts.slice(2).join("\n\n") : text;
+		return new Text(`ℹ background ${d.runId ?? "?"}${d.description ? ` · ${d.description}` : ""}: note (${d.topic ?? "?"})\n\n${body}`, 0, 0);
+	});
+
 	// ── Handoff custom message renderer (§6.4) ─────────────────────────────
 
 	pi.registerMessageRenderer(HANDOFF_CUSTOM_TYPE, (message: { content?: string | unknown[]; details?: unknown }) => {
@@ -908,6 +999,10 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		lines.push(`active run: ${s.activeRun ? `${s.activeRun.runId} (${s.activeRun.role})` : "none"}`);
 		const queued = app.queuedRunCount();
 		lines.push(`queue: ${queued} waiting (concurrent calls serialize; limit ${app.queueLimit()})`);
+		lines.push(backgroundStatusText());
+		for (const q of background.pendingQuestions()) {
+			lines.push(`pending question: ${q.runId} (${q.topic}) — answer with the delegate_answer tool`);
+		}
 		if (s.lastRun) {
 			const dur = s.lastRun.durationMs != null ? `${Math.round(s.lastRun.durationMs / 1000)}s` : "";
 			lines.push(`last run: ${s.lastRun.runId} ${s.lastRun.role} ${s.lastRun.state} ${dur}`.trimEnd());
@@ -1426,7 +1521,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			refreshFooter();
 			// Repair visibility immediately in case the session had drifted.
 			try {
-				syncStrictToolSet(app.getModeRuntime(), pi.getActiveTools(), () => pi.setActiveTools(["delegate"]));
+				syncStrictToolSet(app.getModeRuntime(), pi.getActiveTools(), () => pi.setActiveTools(STRICT_ACTIVE_TOOLS));
 			} catch {
 				// gate remains authoritative
 			}

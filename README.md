@@ -183,6 +183,36 @@ internal work events.
   children — receipts finalize interrupted/resumable. Prefer foreground for
   one-shot headless flows.
 
+### Bidirectional channels (v0.6.0, R16–R19)
+
+Background children are a team, not batch jobs — three channels, all auditable
+from the session JSONL:
+
+- **`delegate_send({ runId, message })`** — steer a live background run. The
+  message is written to the child as an RPC `follow_up` record (pi steering
+  semantics: queued before the child's next model call, never interrupts).
+  Steering re-arms the idle watchdog; terminal runs point at `resumeFrom`.
+- **`ask_parent(kind: "question")`** (child-side tool, background children
+  ONLY — a foreground child asking would deadlock the parent turn by
+  construction, enforced at tool registration). The child's tool call IS the
+  blocking primitive: it polls `$PI_DELEGATE_ASK_DIR/<toolCallId>.json` until
+  the parent answers via **`delegate_answer({ runId, answer })`** — which any
+  model turn can call, and the question's `triggerTurn` wake makes the parent
+  answer autonomously. While a question is open, the runner suspends the
+  idle/stuck watchdogs (the hard cap still applies). On timeout (config
+  `askParent.timeoutMs`, default 10 m) the tool returns the exact fallback
+  “proceed with your best judgment and state the assumption” — the child is
+  never wedged. `askParent.maxPerRun` (default 5) bounds round-trips.
+- **`ask_parent(kind: "note")`** — non-blocking notes (risk/observation/
+  concern) delivered as `delegate-child-note` messages with
+  `triggerTurn: false`: notes NEVER wake an idle parent. Capped at 20/run.
+
+Questions render as `? … asks` cards, notes as `ℹ … note`; `/delegate status`
+lists pending questions. In strict mode the active set is
+`delegate, delegate_status, delegate_send, delegate_answer` — answering your
+own children is coordination, not substantive work (a strict session that
+cannot answer is a deadlock farm).
+
 ### Concurrent calls queue (fan-out just works)
 
 Models naturally issue several `delegate` calls in one turn. Pi executes

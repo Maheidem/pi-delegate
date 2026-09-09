@@ -29,6 +29,12 @@ export interface DelegateConfigV1 {
 	updateThrottleMs: number;
 	/** R9: concurrent background children (default 3, clamp 1–8). */
 	maxBackgroundRuns: number;
+	/** R17/R18: ask_parent channel (background children). */
+	askParent: {
+		enabled: boolean;
+		timeoutMs: number;
+		maxPerRun: number;
+	};
 }
 
 export const DEFAULT_DELEGATE_CONFIG: DelegateConfigV1 = {
@@ -47,6 +53,11 @@ export const DEFAULT_DELEGATE_CONFIG: DelegateConfigV1 = {
 	maxRunAgeDays: 30,
 	updateThrottleMs: 100,
 	maxBackgroundRuns: 3,
+	askParent: {
+		enabled: true,
+		timeoutMs: 600_000,
+		maxPerRun: 5,
+	},
 };
 
 const MIN_VALUES: Partial<Record<keyof DelegateConfigV1, number>> = {
@@ -127,6 +138,19 @@ function applyKnownField(config: DelegateConfigV1, key: string, value: unknown):
 	if (key === "defaultRole") {
 		if ((ROLE_NAMES as readonly string[]).includes(String(value))) {
 			config.defaultRole = value as RoleName;
+		}
+		return;
+	}
+	// R17: nested askParent block — merge field-by-field with clamps.
+	if (key === "askParent") {
+		if (!value || typeof value !== "object" || Array.isArray(value)) return;
+		const raw = value as Record<string, unknown>;
+		if (typeof raw.enabled === "boolean") config.askParent.enabled = raw.enabled;
+		if (Number.isFinite(Number(raw.timeoutMs))) {
+			config.askParent.timeoutMs = Math.min(3_600_000, Math.max(5_000, Number(raw.timeoutMs)));
+		}
+		if (Number.isFinite(Number(raw.maxPerRun))) {
+			config.askParent.maxPerRun = Math.min(20, Math.max(1, Math.trunc(Number(raw.maxPerRun))));
 		}
 		return;
 	}

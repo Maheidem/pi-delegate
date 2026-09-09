@@ -326,6 +326,8 @@ export interface BackgroundRunHandle {
 	cancel: (reason?: string) => void;
 	/** R16: steering to the live child (background runs only). */
 	steer?: (message: string) => { ok: true } | { ok: false; error: string };
+	/** R17: write an answer file for a pending ask_parent question. */
+	writeAnswer?: (toolCallId: string, payload: { answeredBy: "model" | "user"; answeredAt: string; answer: string }) => void;
 	/** Resolves with the terminal DelegateRunResult (never rejects). */
 	completion: Promise<DelegateRunResult>;
 }
@@ -439,6 +441,8 @@ export type RunHooks = {
 	onUpdate?: (update: RunStreamUpdate) => void;
 	/** Live feed events for the running panel and peek views (every event, unthrottled). */
 	onEvent?: (event: FeedEvent) => void;
+	/** R17/R18: ask_parent channel events from the child stream. */
+	onAsk?: (ask: { runId: string; phase: "start" | "end"; kind: "question" | "note"; topic: string; text: string; toolCallId: string }) => void;
 	abortSignal?: AbortSignal;
 };
 
