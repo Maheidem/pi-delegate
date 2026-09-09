@@ -1,71 +1,73 @@
 {
-	"name": "@maheidem/pi-delegate",
-	"version": "0.6.0",
-	"type": "module",
-	"description": "Foreground isolated delegation and strict coordinator mode for the Pi coding agent.",
-	"license": "MIT",
-	"author": "maheidem",
-	"keywords": [
-		"pi",
-		"pi-coding-agent",
-		"pi-extension",
-		"delegate",
-		"subagent",
-		"orchestration",
-		"coordinator"
-	],
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/Maheidem/pi-delegate.git"
-	},
-	"bugs": {
-		"url": "https://github.com/Maheidem/pi-delegate/issues"
-	},
-	"homepage": "https://github.com/Maheidem/pi-delegate#readme",
-	"publishConfig": {
-		"access": "public"
-	},
-	"files": [
-		"index.ts",
-		"application.ts",
-		"commands.ts",
-		"config.ts",
-		"mode.ts",
-		"roles.ts",
-		"runner.ts",
-		"rpc-jsonl.ts",
-		"run-store.ts",
-		"types.ts",
-		"version.ts",
-		"handoff.ts",
-		"transcript-feed.ts",
-		"roles/",
-		"ui/",
-		"README.md",
-		"LICENSE"
-	],
-	"scripts": {
-		"typecheck": "tsc -p tsconfig.json",
-		"test": "node tests/run.mjs",
-		"test:unit": "node tests/run.mjs",
-		"test:e2e": "node tests/e2e.mjs",
-		"prepack": "npm run typecheck && npm test"
-	},
-	"peerDependencies": {
-		"@earendil-works/pi-coding-agent": ">=0.84.4",
-		"@earendil-works/pi-tui": "*",
-		"typebox": "*"
-	},
-	"devDependencies": {
-		"@earendil-works/pi-coding-agent": "^0.84.4",
-		"@earendil-works/pi-tui": "^0.84.4",
-		"@types/node": "^22.0.0",
-		"typebox": "^1.0.17",
-		"typescript": "^5.9.3"
-	},
-	"pi": {
-		"extensions": [
-			"./index.ts"
-		]
-	}
+  "name": "@maheidem/pi-delegate",
+  "version": "0.6.1",
+  "type": "module",
+  "description": "Foreground isolated delegation and strict coordinator mode for the Pi coding agent.",
+  "license": "MIT",
+  "author": "maheidem",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "delegate",
+    "subagent",
+    "orchestration",
+    "coordinator"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Maheidem/pi-delegate.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Maheidem/pi-delegate/issues"
+  },
+  "homepage": "https://github.com/Maheidem/pi-delegate#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "index.ts",
+    "application.ts",
+    "background.ts",
+    "ask.ts",
+    "commands.ts",
+    "config.ts",
+    "mode.ts",
+    "roles.ts",
+    "runner.ts",
+    "rpc-jsonl.ts",
+    "run-store.ts",
+    "types.ts",
+    "version.ts",
+    "handoff.ts",
+    "transcript-feed.ts",
+    "roles/",
+    "ui/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node tests/run.mjs",
+    "test:unit": "node tests/run.mjs",
+    "test:e2e": "node tests/e2e.mjs",
+    "prepack": "npm run typecheck && npm test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.84.4",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.4",
+    "@earendil-works/pi-tui": "^0.84.4",
+    "@types/node": "^22.0.0",
+    "typebox": "^1.0.17",
+    "typescript": "^5.9.3"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
 }

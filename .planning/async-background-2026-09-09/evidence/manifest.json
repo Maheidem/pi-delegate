@@ -3,7 +3,7 @@
   "feature": "async/background delegation (SPEC R8\u2013R19)",
   "goalBaseline": "0.3.2 @ c5f14a6, SPEC APPROVED 2026-09-09",
   "finalState": {
-    "version": "0.6.0",
+    "version": "0.6.1",
     "gates": {
       "typecheck": "0 errors",
       "unit": "178/178 (143 pre-existing semantics preserved; inventory assertions updated for spec-mandated additions: delegate_status/delegate_send/delegate_answer tools, 4 message renderers, strict 4-tool set)",
@@ -101,5 +101,15 @@
     "status": "completed 2026-09-09 (user-directed publish)",
     "flow": "npm publish (user go: 'run the publish yourself') \u2192 pi install npm:@maheidem/pi-delegate@0.6.0 (explicit version required: store pinned ^0.3.2, caret on 0.x does not jump minor) \u2192 store version verified 0.6.0, manifest bumped ^0.6.0",
     "remaining": "user runs /reload in live sessions"
-  }
+  },
+  "hotfixes": [
+    {
+      "id": "0.6.1-tarball-integrity",
+      "symptom": "fresh sessions after 0.6.0 install: '/delegate' absent \u2014 extension load failed: Cannot find module './ask.ts'",
+      "rootCause": "package.json files allowlist predates the goal; background.ts and ask.ts were never added, so the published tarball omitted both. Source-tree tests (npm test/prepack) cannot catch this \u2014 they import from the source, not the tarball.",
+      "fix": "0.6.1: both modules added to files; new tests/tarball.test.ts (3 tests) asserts every root runtime module is in the allowlist and every relative .ts import resolves inside the shipped set \u2014 runs in npm test and therefore in prepack, blocking future broken publishes",
+      "verify": "pi -p '/delegate status' in a fresh session renders v0.6.1 incl. the background inventory line; store copy contains ask.ts + background.ts",
+      "note": "goal-run gates were all green because they exercise the source tree; the publish flow lacked a tarball-content gate \u2014 now closed"
+    }
+  ]
 }
