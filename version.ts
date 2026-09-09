@@ -5,24 +5,20 @@
  * newer npm-store installs only apply after /reload. Every result header
  * and /delegate status therefore carries the version actually executing,
  * so "stale copy in this process" is self-evident instead of mysterious.
+ *
+ * Thin wrapper (S2) over the canonical helper vendored at `ui/version.ts`
+ * (kit source: `skills/pi-extension-builder/assets/control-panel/…`); the
+ * public name and return string are unchanged — the package.json path is
+ * resolved from THIS module's URL, as before.
  */
 
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-let cached: string | null = null;
+import { extensionVersion } from "./ui/version.ts";
 
 export function delegateVersion(): string {
-	if (cached) return cached;
-	try {
-		const here = path.dirname(fileURLToPath(import.meta.url));
-		const pkg = JSON.parse(fs.readFileSync(path.join(here, "package.json"), "utf8")) as {
-			version?: string;
-		};
-		cached = pkg.version ?? "unknown";
-	} catch {
-		cached = "unknown";
-	}
-	return cached;
+	return extensionVersion({
+		packageJsonPath: path.join(path.dirname(fileURLToPath(import.meta.url)), "package.json"),
+	});
 }
