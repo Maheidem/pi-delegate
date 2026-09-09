@@ -823,7 +823,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			: "";
 		const parts = text.split("\n\n");
 		const body = parts.length > 2 ? parts.slice(2).join("\n\n") : text;
-		return new Text(`? background ${d.runId ?? "?"}${d.description ? ` · ${d.description}` : ""}: asks (${d.topic ?? "?"})\n\n${body}`, 0, 0);
+		return new Text(`? background ${(d.runId ?? "?").slice(-12)}${d.description ? ` · ${d.description}` : ""}: asks (${d.topic ?? "?"})\n\n${body}`, 0, 0);
 	});
 
 	pi.registerMessageRenderer(CHILD_NOTE_TYPE, (message: { content?: string | unknown[]; details?: unknown }) => {
@@ -835,7 +835,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			: "";
 		const parts = text.split("\n\n");
 		const body = parts.length > 2 ? parts.slice(2).join("\n\n") : text;
-		return new Text(`ℹ background ${d.runId ?? "?"}${d.description ? ` · ${d.description}` : ""}: note (${d.topic ?? "?"})\n\n${body}`, 0, 0);
+		return new Text(`ℹ background ${(d.runId ?? "?").slice(-12)}${d.description ? ` · ${d.description}` : ""}: note (${d.topic ?? "?"})\n\n${body}`, 0, 0);
 	});
 
 	// ── Handoff custom message renderer (§6.4) ─────────────────────────────

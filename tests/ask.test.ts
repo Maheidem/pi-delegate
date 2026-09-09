@@ -109,13 +109,9 @@ test("R17: question envelope is byte-exact and names delegate_answer", () => {
 	const text = formatChildQuestionEnvelope("del_a", "research", "Trace the login flow", "blocked", "Which database, prod or staging?");
 	assert.equal(
 		text,
-		"[delegate background del_a · research · Trace the login flow: asks]\n" +
+		"### [delegate background del_a · research · Trace the login flow: asks]\n" +
 			"\n" +
-			"A delegated child is blocked waiting for your answer (topic: blocked). Answer\n" +
-			"with the delegate_answer tool: delegate_answer({ runId: \"del_a\", answer: \"…\" }).\n" +
-			"Be terse and directive; the child resumes the moment your answer lands. Do not\n" +
-			"narrate this exchange to the user unless it is material. If you cannot answer,\n" +
-			"say so — the child proceeds with its best judgment after the ask budget expires.\n" +
+			"<!-- A delegated child is blocked waiting for your answer (topic: blocked). Answer with the delegate_answer tool: delegate_answer({ runId: \"del_a\", answer: \"…\" }). Be terse and directive; the child resumes the moment your answer lands. Do not narrate this exchange to the user unless it is material. If you cannot answer, say so — the child proceeds with its best judgment after the ask budget expires. -->\n" +
 			"\n" +
 			"Which database, prod or staging?",
 	);
@@ -125,10 +121,9 @@ test("R18: note envelope is byte-exact", () => {
 	const text = formatChildNoteEnvelope("del_a", "general", "Run the suite", "risk", "Tests write to /tmp shared state.");
 	assert.equal(
 		text,
-		"[delegate background del_a · general · Run the suite: note]\n" +
+		"### [delegate background del_a · general · Run the suite: note]\n" +
 			"\n" +
-			"A delegated child filed a non-blocking note (topic: risk). No answer is\n" +
-			"expected or possible. Treat it as an internal work event.\n" +
+			"<!-- A delegated child filed a non-blocking note (topic: risk). No answer is expected or possible. Treat it as an internal work event. -->\n" +
 			"\n" +
 			"Tests write to /tmp shared state.",
 	);

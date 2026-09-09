@@ -3,7 +3,7 @@
   "feature": "async/background delegation (SPEC R8\u2013R19)",
   "goalBaseline": "0.3.2 @ c5f14a6, SPEC APPROVED 2026-09-09",
   "finalState": {
-    "version": "0.6.2",
+    "version": "0.6.3",
     "gates": {
       "typecheck": "0 errors",
       "unit": "178/178 (143 pre-existing semantics preserved; inventory assertions updated for spec-mandated additions: delegate_status/delegate_send/delegate_answer tools, 4 message renderers, strict 4-tool set)",
@@ -84,6 +84,16 @@
       ],
       "dogfood": "the R20 docs task itself ran as the session's first background delegation (del_20260909T204352Z_65f67860): instant runId return, delegate_status live tail mid-flight, terminal report woke the session per R10 \u2014 the full async loop observed in production use",
       "shipped": "0.6.2"
+    },
+    "M7": {
+      "status": "gate-passed (R21, user-requested presentation fix)",
+      "gate": "typecheck 0; unit 183/183 (also green under a simulated polluted child env after the run.mjs prefix-guard fix)",
+      "requirements": [
+        "R21 markdown-native envelopes (H3 header, single-line HTML-comment classification) + short runId displays"
+      ],
+      "renderProof": "pi --export of a swapped copy of this session: embedded base64 session-data contains H3 headers + single-line comments; marked renders <h3>, comment-invisible, ## Outcome as <h2>; panel keeps --customMessageBg styling",
+      "dogfood": "implementation ran as the session's SECOND background delegation; its mid-run ask_parent note (concern channel) flagged the false-positive test failures live \u2014 the R18 channel's first production use",
+      "shipped": "0.6.3"
     }
   },
   "knownGaps": [
@@ -119,6 +129,12 @@
       "fix": "0.6.1: both modules added to files; new tests/tarball.test.ts (3 tests) asserts every root runtime module is in the allowlist and every relative .ts import resolves inside the shipped set \u2014 runs in npm test and therefore in prepack, blocking future broken publishes",
       "verify": "pi -p '/delegate status' in a fresh session renders v0.6.1 incl. the background inventory line; store copy contains ask.ts + background.ts",
       "note": "goal-run gates were all green because they exercise the source tree; the publish flow lacked a tarball-content gate \u2014 now closed"
+    },
+    {
+      "id": "run-mjs-env-guard",
+      "symptom": "background child reported 'main is red at HEAD' (2 test failures)",
+      "rootCause": "tests/run.mjs stripped only PI_DELEGATE_CHILD/RUN_ID/PARENT_PID; background children add PI_DELEGATE_ASK_DIR/BACKGROUND, which flipped child-mode registration expectations inside the child's env",
+      "fix": "prefix-based guard (all PI_DELEGATE_*); verified green under simulated polluted env; lesson recorded in AGENTS.md"
     }
   ]
 }

@@ -339,6 +339,20 @@ path (panel ≡ command ≡ headless parity), and a background launch NEVER bloc
 the invoking turn — the command resolves as soon as the child is spawned and
 registered, exactly as the tool call does.
 
+
+**R21 — Rendered-view presentation (export + TUI).** Custom-message content is
+read by TWO audiences: the model (raw content, verbatim) and rendered views
+(pi's HTML export renders `display: true` custom messages as markdown in a
+themed panel — extension renderers do NOT run there). Therefore every envelope
+(R10 result, R17 question, R18 note) MUST be markdown-native: the header line
+is a level-3 markdown heading; the model-only classification paragraph is
+wrapped in a single-line HTML comment (`<!-- … -->`) so rendered views hide it
+while the model context keeps it verbatim; the report body keeps its existing
+`##` section structure. The TUI display (`backgroundResultDisplay` and the
+question/note renderers) MUST show the short runId (last 12 chars) with the
+full runId remaining in message `details`; glyph+word state discipline (UX
+standard) is unchanged. Envelope snapshot tests are updated to the new bytes;
+dedup scans (R12) match on `details.runId` and are unaffected.
 ---
 
 ## 5. Exact message envelopes (normative text)

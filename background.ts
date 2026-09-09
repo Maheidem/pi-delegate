@@ -150,11 +150,9 @@ export function formatBackgroundResultEnvelope(
 	runText: string,
 ): string {
 	return (
-		`[delegate background ${runId} · ${role} · ${description}: ${backgroundStateWord(state)}]\n` +
+		`### [delegate background ${runId} · ${role} · ${description}: ${backgroundStateWord(state)}]\n` +
 		"\n" +
-		"This is the terminal report of a background delegation. The run has finished and\n" +
-		"cannot receive steering. Treat it as an internal work event: write user-visible\n" +
-		"text only if material, and do not re-narrate the handoff.\n" +
+		"<!-- This is the terminal report of a background delegation. The run has finished and cannot receive steering. Treat it as an internal work event: write user-visible text only if material, and do not re-narrate the handoff. -->\n" +
 		"\n" +
 		runText
 	);
@@ -173,13 +171,9 @@ export function formatBackgroundStartedText(runId: string, role: RoleName, descr
 /** R17: the question envelope (SPEC §5, byte-exact; wakes the parent). */
 export function formatChildQuestionEnvelope(runId: string, role: RoleName, description: string, topic: string, question: string): string {
 	return (
-		`[delegate background ${runId} · ${role} · ${description}: asks]\n` +
+		`### [delegate background ${runId} · ${role} · ${description}: asks]\n` +
 		"\n" +
-		`A delegated child is blocked waiting for your answer (topic: ${topic}). Answer\n` +
-		`with the delegate_answer tool: delegate_answer({ runId: "${runId}", answer: "…" }).\n` +
-		"Be terse and directive; the child resumes the moment your answer lands. Do not\n" +
-		"narrate this exchange to the user unless it is material. If you cannot answer,\n" +
-		"say so — the child proceeds with its best judgment after the ask budget expires.\n" +
+		`<!-- A delegated child is blocked waiting for your answer (topic: ${topic}). Answer with the delegate_answer tool: delegate_answer({ runId: "${runId}", answer: "…" }). Be terse and directive; the child resumes the moment your answer lands. Do not narrate this exchange to the user unless it is material. If you cannot answer, say so — the child proceeds with its best judgment after the ask budget expires. -->\n` +
 		"\n" +
 		question
 	);
@@ -188,10 +182,9 @@ export function formatChildQuestionEnvelope(runId: string, role: RoleName, descr
 /** R18: the note envelope (SPEC §5, byte-exact; NEVER wakes the parent). */
 export function formatChildNoteEnvelope(runId: string, role: RoleName, description: string, topic: string, note: string): string {
 	return (
-		`[delegate background ${runId} · ${role} · ${description}: note]\n` +
+		`### [delegate background ${runId} · ${role} · ${description}: note]\n` +
 		"\n" +
-		`A delegated child filed a non-blocking note (topic: ${topic}). No answer is\n` +
-		"expected or possible. Treat it as an internal work event.\n" +
+		`<!-- A delegated child filed a non-blocking note (topic: ${topic}). No answer is expected or possible. Treat it as an internal work event. -->\n` +
 		"\n" +
 		note
 	);
@@ -760,7 +753,7 @@ export function backgroundResultDisplay(content: string, details: { runId?: stri
 	const state = (details.state ?? "?") as RunTerminalState;
 	const word = backgroundStateWord(state);
 	const glyph = state === "succeeded" ? "✓" : state === "cancelled" ? "⊘" : state.startsWith("timed_out") ? "⏱" : "⚠";
-	const runId = details.runId ?? "?";
+	const runId = (details.runId ?? "?").slice(-12);
 	const desc = details.description ? ` · ${details.description}` : "";
 	const bodyLines = body.split("\n");
 	const head = bodyLines[0] ?? "";

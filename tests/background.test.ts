@@ -191,11 +191,9 @@ test("R10: terminal result envelope is byte-exact", () => {
 	);
 	assert.equal(
 		text,
-		"[delegate background del_20260909T000000Z_00000001 · research · Trace login validation: timed out_hard]\n" +
+		"### [delegate background del_20260909T000000Z_00000001 · research · Trace login validation: timed out_hard]\n" +
 			"\n" +
-			"This is the terminal report of a background delegation. The run has finished and\n" +
-			"cannot receive steering. Treat it as an internal work event: write user-visible\n" +
-			"text only if material, and do not re-narrate the handoff.\n" +
+			"<!-- This is the terminal report of a background delegation. The run has finished and cannot receive steering. Treat it as an internal work event: write user-visible text only if material, and do not re-narrate the handoff. -->\n" +
 			"\n" +
 			"[rendered body]",
 	);
@@ -209,12 +207,12 @@ test("R8: started text names the run and instructs polling", () => {
 });
 
 test("R10: state words map terminal states", () => {
-	assert.equal(formatBackgroundResultEnvelope("r", "general", "d d d", "succeeded", "x").includes(": completed]"), true);
-	assert.equal(formatBackgroundResultEnvelope("r", "general", "d d d", "cancelled", "x").includes(": cancelled]"), true);
+	assert.equal(formatBackgroundResultEnvelope("r", "general", "d d d", "succeeded", "x").includes("### [delegate background r · general · d d d: completed]"), true);
+	assert.equal(formatBackgroundResultEnvelope("r", "general", "d d d", "cancelled", "x").includes("### [delegate background r · general · d d d: cancelled]"), true);
 	// Foreground mapping verbatim (first-underscore replace), so the outer
 	// header always agrees with the embedded formatRunText header.
-	assert.equal(formatBackgroundResultEnvelope("r", "general", "d d d", "timed_out_idle", "x").includes(": timed out_idle]"), true);
-	assert.equal(formatBackgroundResultEnvelope("r", "general", "d d d", "crashed", "x").includes(": crashed]"), true);
+	assert.equal(formatBackgroundResultEnvelope("r", "general", "d d d", "timed_out_idle", "x").includes("### [delegate background r · general · d d d: timed out_idle]"), true);
+	assert.equal(formatBackgroundResultEnvelope("r", "general", "d d d", "crashed", "x").includes("### [delegate background r · general · d d d: crashed]"), true);
 });
 
 // ── R11: ledger projection ────────────────────────────────────────────────
@@ -271,7 +269,7 @@ test("R8/R10/R11: happy path writes created, then finished before delivery", asy
 		runId: "del_a", role: "general", state: "succeeded",
 		description: "validate background core", kind: "result",
 	});
-	assert.ok(recorded.sent[0].message.content.startsWith("[delegate background del_a · general · validate background core: completed]"));
+	assert.ok(recorded.sent[0].message.content.startsWith("### [delegate background del_a · general · validate background core: completed]"));
 });
 
 // ── R9: slots ─────────────────────────────────────────────────────────────
@@ -541,11 +539,23 @@ test("R14: detail text carries state, live phase, tail, and resume hint", () => 
 });
 
 test("R15: display strips the model-only classification paragraph", () => {
-	const content = formatBackgroundResultEnvelope("del_a", "general", "run a task", "succeeded", "[delegate v0.5 · header line]\n\nhandoff body line");
-	const display = backgroundResultDisplay(content, { runId: "del_a", state: "succeeded", description: "run a task" });
-	assert.match(display, /✓ background del_a · run a task: completed/);
+	const content = formatBackgroundResultEnvelope("del_20260909T000000Z_00000001", "general", "run a task", "succeeded", "[delegate v0.5 · header line]\n\nhandoff body line");
+	const display = backgroundResultDisplay(content, { runId: "del_20260909T000000Z_00000001", state: "succeeded", description: "run a task" });
+	assert.match(display, /✓ background 00Z_00000001 · run a task: completed/);
 	assert.ok(!display.includes("internal work event"), "model-only sentence never displayed");
+	assert.ok(!display.includes("<!--"), "model-only comment never displayed");
 	assert.match(display, /handoff body line/);
+});
+
+test("R21: envelope classification is a single-line HTML comment, never displayed", () => {
+	const runId = "del_20260909T000000Z_00000001";
+	const content = formatBackgroundResultEnvelope(runId, "general", "run a task", "succeeded", "body text");
+	const match = content.match(/<!--[\s\S]*?-->/);
+	assert.ok(match, "envelope carries an HTML comment");
+	assert.ok(!match[0].includes("\n"), "classification comment is a single line (no internal newlines)");
+	const display = backgroundResultDisplay(content, { runId, state: "succeeded", description: "run a task" });
+	assert.ok(!display.includes("<!--"), "display never shows the comment span");
+	assert.equal(content.split("\n\n").length >= 3, true, "header/comment/body parts stay \n\n-separated");
 });
 
 test("R15: display glyph+word per state (never color-alone)", () => {
