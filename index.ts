@@ -40,6 +40,7 @@ import type {
 } from "./types.ts";
 import { SettingsPanel, type PanelSnapshot, type PanelActionResult, type PanelSection, type PanelRow } from "./ui/settings-panel.ts";
 import { shortModel, formatTokens, formatCost, stateGlyph, progressBar, projectValueCell } from "./ui/format.ts";
+import { renderToolCallCard, renderToolPlainCard, renderToolResultCard, type ToolCardLine } from "./ui/tool-card.ts";
 import { RunningView, type RunningViewState } from "./ui/running-view.ts";
 import { PeekView } from "./ui/peek-view.ts";
 import { FeedRing, feedEventsFromTranscript, renderFeedEvents } from "./transcript-feed.ts";
@@ -438,42 +439,49 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			const role = typeof args.role === "string" ? args.role : config.defaultRole;
 			const task = typeof args.task === "string" ? args.task : "";
 			const modelBit = typeof args.model === "string" && args.model ? ` · ${shortModel(args.model)}` : "";
-			const text = `→ delegate · ${role}${modelBit}: ${task.length > 64 ? `${task.slice(0, 61)}…` : task}`;
-			return new Text(theme?.fg ? theme.fg("accent", text) : text, 0, 0);
+			return renderToolCallCard(theme, {
+				title: "delegate",
+				subject: role,
+				qualifier: `${modelBit}: ${task.length > 64 ? `${task.slice(0, 61)}…` : task}`,
+			});
 		},
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		renderResult(result: any, options: any, theme: any) {
 			const d = result.details as DelegateDetails | undefined;
 			if (!d?.runId) {
 				const text = (result.content ?? []).map((c: { text?: string }) => c.text ?? "").filter(Boolean).join("\n");
-				return new Text(text || "(no output)", 0, 0);
+				return renderToolPlainCard(text);
 			}
-			const fg = (kind: string, s: string) => (theme?.fg ? theme.fg(kind, s) : s);
 			const u = d.usage ?? ({} as DelegateDetails["usage"]);
 			// Neutral, non-color-alone state word (cancelled ≠ failed ≠ timeout).
-			const g = stateGlyph(d.state);
-			const bits: string[] = [`${d.role} ${g.glyph} ${g.word}`, `${Math.round(d.durationMs / 1000)}s`];
-			if (d.model) bits.push(shortModel(d.model));
-			bits.push(`↑${formatTokens(u.input)} ↓${formatTokens(u.output)}`);
-			if (u.cost) bits.push(formatCost(u.cost));
+			const bits = [
+				`${Math.round(d.durationMs / 1000)}s`,
+				...(d.model ? [shortModel(d.model)] : []),
+				`↑${formatTokens(u.input)} ↓${formatTokens(u.output)}`,
+				...(u.cost ? [formatCost(u.cost)] : []),
+			];
 			const header = `→ ${d.runId.slice(-16)}`;
-			const color = g.color;
 			if (!options?.expanded) {
-				const lines = [fg("accent", header), fg(color, bits.join(" "))];
 				// Inline tail ≤5 — partial handoff (timeout/cancel) or reason, never bare.
 				const tailSrc: string = d.partialHandoff ?? (d.state === "succeeded" ? "" : (result.content ?? []).map((c: { text?: string }) => c.text ?? "").join(" ").split("\n")[0] ?? "");
 				const tail = tailSrc ? tailSrc.split("\n").map((l: string) => l.trim()).filter(Boolean).slice(0, 5) : [];
-				for (const t of tail) lines.push(fg("muted", `  ${t}`));
-				if (d.outputTruncated && d.transcriptPath) lines.push(fg("muted", `  transcript: ${d.transcriptPath}`));
-				return new Text(lines.join("\n"), 0, 0);
+				const detailLines: ToolCardLine[] = tail.map((t) => ({ text: `  ${t}` }));
+				if (d.outputTruncated && d.transcriptPath) detailLines.push({ text: `  transcript: ${d.transcriptPath}` });
+				return renderToolResultCard(theme, { header, lead: d.role, state: d.state, stateBits: bits, detailLines });
 			}
 			// Expanded: identity + canonical summary + resume hint.
 			const summary = formatRunSummary(result as unknown as DelegateRunResult);
-			const lines = [fg("accent", header), fg(color, bits.join(" "))];
-			if (summary) for (const l of summary.split("\n")) lines.push(l);
-			if (d.sessionPath && d.state !== "succeeded") lines.push(fg("muted", `  resume: resumeFrom ${d.runId}`));
-			if (d.transcriptPath) lines.push(fg("muted", `  transcript: ${d.transcriptPath}`));
-			return new Text(lines.join("\n"), 0, 0);
+			const detailLines: ToolCardLine[] = [];
+			if (d.sessionPath && d.state !== "succeeded") detailLines.push({ text: `  resume: resumeFrom ${d.runId}` });
+			if (d.transcriptPath) detailLines.push({ text: `  transcript: ${d.transcriptPath}` });
+			return renderToolResultCard(theme, {
+				header,
+				lead: d.role,
+				state: d.state,
+				stateBits: bits,
+				plainLines: summary ? summary.split("\n") : undefined,
+				detailLines,
+			});
 		},
 	});
 
