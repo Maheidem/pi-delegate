@@ -1,0 +1,20 @@
+╭─ Peek · abcdef0123456789 · general · glm-5.3 · running ────╮
+│ [90m~/.pi/agent/delegate/runs/run-abc/transcript.jsonl[0m │
+│ [32m● live — following · j/k scroll · f re-follow · q close[0m │
+│  │
+│  │
+│ [37m+0s ▶ read src/index.ts[0m │
+│ [37m+3s ✓ bash npm test[0m │
+│ [37m+6s · read src/index.ts[0m │
+│ [37m+9s ▶ bash npm test[0m │
+│ [37m+12s ✓ read src/index.ts[0m │
+│ [37m+15s · bash npm test[0m │
+│ [37m+18s ▶ read src/index.ts[0m │
+│ [37m+21s ✓ bash npm test[0m │
+│ [37m+24s · read src/index.ts[0m │
+│ [37m+27s ▶ bash npm test[0m │
+│ [37m+30s ✓ read src/index.ts[0m │
+│ [37m+33s · bash npm test[0m │
+│ [37m+36s ▶ read src/index.ts[0m │
+│ [37m+39s ✓ bash npm test[0m │
+╰────────────────────────────────────────────────────────────╯

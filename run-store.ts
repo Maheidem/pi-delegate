@@ -98,6 +98,8 @@ export function openRun(agentDir: string, request: DelegateRequest): OpenedRun {
 		usage: { ...EMPTY_USAGE },
 		transcriptPath: paths.transcriptPath,
 		stderrPath: paths.stderrPath,
+		...(request.background ? { background: true } : {}),
+		...(request.description ? { description: request.description } : {}),
 	};
 	atomicWriteJson(paths.metadataPath, metadata);
 
@@ -209,6 +211,9 @@ export interface RunSummary {
 	finishedAt?: string;
 	durationMs?: number;
 	mtimeMs: number;
+	/** R14: background-run marker + description (absent on foreground runs). */
+	background?: boolean;
+	description?: string;
 }
 
 /** List runs newest-first (by metadata mtime, falling back to createdAt). */
@@ -249,6 +254,8 @@ export function listRuns(agentDir: string, limit = 50): RunSummary[] {
 						? Date.parse(meta.finishedAt) - Date.parse(meta.startedAt)
 						: undefined,
 				mtimeMs,
+				...(meta.background ? { background: true } : {}),
+				...(meta.description ? { description: meta.description } : {}),
 			});
 		} catch {
 			// unreadable metadata: leave alone; retention will not touch it

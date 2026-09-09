@@ -1,0 +1,9 @@
+╭─ Delegating ─────────────────────────────────────────────────────────────────╮
+│ general · glm-5.3 · 41s · turn 7 · ↑1.2k ↓567 │
+│ [36m█░░░░░░░░░░░░░░░░░░░░░░░ 2% of 30m hard[0m │
+│ [90min flight: bash, edit index.ts[0m │
+│  │
+│ [37m+3s ▶ bash npm test[0m │
+│ [37m+41s ✓ bash npm test (38s)[0m │
+│ [37m+52s ✎ ## Outcome — long line long line long line long line long line lon[0m...[0m[0m │
+│ [90mesc/q cancel (press twice)[0m │

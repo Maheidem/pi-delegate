@@ -46,6 +46,33 @@ try {
 	// no settings to patch
 }
 
+// Optional e2e model override, e.g. DELEGATE_E2E_MODEL=zai/glm-5.3 — keeps the
+// local oMLX free during long e2e runs; remote built-in providers ride the
+// auth.json copy above. Format: "<provider>/<model-id>".
+const E2E_MODEL = (() => {
+	const raw = (process.env.DELEGATE_E2E_MODEL ?? "").trim();
+	if (!raw) return null;
+	const idx = raw.indexOf("/");
+	if (idx <= 0 || idx >= raw.length - 1) return null;
+	return { provider: raw.slice(0, idx), model: raw.slice(idx + 1), full: raw };
+})();
+if (E2E_MODEL) {
+	try {
+		const settingsPath = path.join(E2E_CFG, "settings.json");
+		const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+		settings.defaultProvider = E2E_MODEL.provider;
+		settings.defaultModel = E2E_MODEL.model;
+		// enabledModels must include the override or pi may reject it at startup.
+		if (Array.isArray(settings.enabledModels) && !settings.enabledModels.includes(E2E_MODEL.full)) {
+			settings.enabledModels.push(E2E_MODEL.full);
+		}
+		fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+	} catch (error) {
+		console.log(`FATAL e2e: DELEGATE_E2E_MODEL=${process.env.DELEGATE_E2E_MODEL} could not be applied: ${error?.message ?? error}`);
+		process.exit(1);
+	}
+}
+
 const fails = [];
 let checks = 0;
 // Scenario filter for targeted runs: E2E_SCENARIOS=D,F (default: all).
@@ -105,6 +132,15 @@ async function modelAvailable() {
 				// try next
 			}
 		}
+	}
+	// Built-in remote providers (zai, openai, …) have no models.json entry; their
+	// credentials live in auth.json (copied into E2E_CFG above). A credential
+	// entry counts as available — a dead remote fails scenarios loudly, not silently skips.
+	try {
+		const auth = JSON.parse(fs.readFileSync(path.join(cfgDir, "auth.json"), "utf8"));
+		if (auth && typeof auth === "object" && auth[settings.defaultProvider]) return true;
+	} catch {
+		// no auth.json
 	}
 	return false;
 }
@@ -278,10 +314,13 @@ async function awaitReceipt(pred, timeoutMs = 300_000) {
 	}
 }
 
-function startPi(dir) {
+function startPi(dir, opts = {}) {
 	// --approve: trust the ephemeral E2E workspace so its project-local
-	// extension loads in non-interactive RPC mode.
-	const child = spawn("pi", ["--mode", "rpc", "--approve"], { cwd: dir, stdio: ["pipe", "pipe", "pipe"] });
+	// extension loads in non-interactive RPC mode. --session: durable
+	// session file (background scenarios inspect the JSONL directly).
+	const args = ["--mode", "rpc", "--approve"];
+	if (opts.session) args.push("--session", opts.session);
+	const child = spawn("pi", args, { cwd: dir, stdio: ["pipe", "pipe", "pipe"] });
 	child.stderr.on("data", () => {});
 	return new RpcClient(child);
 }
@@ -320,6 +359,44 @@ function readReceipt(runId) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Session-JSONL helpers (background scenarios). Shapes verified against
+// pi persistence: appendEntry -> {type:"custom", customType, data};
+// sendMessage -> custom_message entries with customType + details.
+function readSessionEntries(sessionFile) {
+	if (!fs.existsSync(sessionFile)) return [];
+	return fs
+		.readFileSync(sessionFile, "utf8")
+		.split("\n")
+		.filter((l) => l.trim())
+		.map((l) => {
+			try {
+				return JSON.parse(l);
+			} catch {
+				return null;
+		}
+		})
+		.filter(Boolean);
+}
+const bgLedger = (entries) =>
+	entries.filter((e) => e.type === "custom" && e.customType === "delegate.background");
+const bgResults = (entries) =>
+	entries.filter((e) => e.type === "custom_message" && e.customType === "delegate-background-result");
+
+async function waitFor(pred, timeoutMs, label) {
+	const start = Date.now();
+	for (;;) {
+		let value;
+		try {
+			value = pred();
+		} catch {
+			value = null;
+		}
+		if (value) return value;
+		if (Date.now() - start > timeoutMs) return null;
+		await sleep(300);
+	}
+}
 
 async function main() {
 	if (!(await modelAvailable())) {
@@ -626,6 +703,133 @@ async function main() {
 		ok(/base timeout: 2h hard/.test(s), `E: status shows project 2h hard base timeout`);
 		ok(/\(project /.test(s), "E: source attributed to the project file");
 		await stop(pi);
+		}
+	}
+
+	// ── Scenario L: background fan-out — 2 runs, delivery, wake, no dupes ─
+	{
+		if (runScenario("L")) {
+		const dir = makeWorkspace();
+		const sessionFile = path.join(dir, "e2e-session.jsonl");
+		const pi = startPi(dir, { session: sessionFile });
+		await pi.prompt(
+				"Call the delegate tool TWICE in this turn, both times with background=true. " +
+				"First call: task='Create a file named bg-one.txt containing exactly the word ALPHA, then verify it exists.' description='Write ALPHA test file'. " +
+				"Second call: task='Create a file named bg-two.txt containing exactly the word BETA, then verify it exists.' description='Write BETA test file'. " +
+				"Both calls return immediately. After both have returned, reply with exactly: SPAWNED.",
+				300_000,
+			);
+		const started = pi.allText();
+		ok(/delegate background started/.test(started), "L: background tool result returns runId immediately");
+
+		// Both receipts reach a terminal state.
+		const terminals = await waitFor(
+			() => {
+				const es = readSessionEntries(sessionFile);
+				const fin = bgLedger(es).filter((e) => e.data?.type === "finished");
+				const msgs = bgResults(es);
+				return fin.length >= 2 && msgs.length >= 2 ? { fin, msgs, es } : null;
+			},
+			360_000,
+			"terminal+delivered",
+		);
+		ok(!!terminals, "L: 2 finished ledger entries + 2 delivered result messages");
+		if (terminals) {
+			const { msgs, es } = terminals;
+			// Children did the real work.
+			ok(fs.readFileSync(path.join(dir, "bg-one.txt"), "utf8").includes("ALPHA"), "L: bg-one.txt written by child 1");
+			ok(fs.readFileSync(path.join(dir, "bg-two.txt"), "utf8").includes("BETA"), "L: bg-two.txt written by child 2");
+			// Envelope + details discipline.
+			const contents = msgs.map((m) => String(m.content ?? "")).join("\n--\n");
+			ok(contents.includes("terminal report of a background delegation"), "L: envelope carries the classification paragraph");
+			ok(contents.includes("internal work event"), "L: envelope instructs internal-work-event handling");
+			const runIds = msgs.map((m) => m.details?.runId).filter(Boolean);
+			ok(new Set(runIds).size === 2, `L: two distinct runIds delivered (${runIds.join(",")})`);
+			ok(msgs.every((m) => m.details?.kind === "result"), "L: result messages carry kind=result");
+			// Wake: an assistant entry after the last delivered message (no
+			// intervening user prompt) proves triggerTurn woke the idle parent.
+			const lastMsgIdx = Math.max(...msgs.map((m) => es.indexOf(m)));
+			const woke = await waitFor(
+				() => {
+					const fresh = readSessionEntries(sessionFile);
+					const freshMsgs = bgResults(fresh);
+					if (!freshMsgs.length) return false;
+					const lastIdx = Math.max(...freshMsgs.map((m) => fresh.indexOf(m)));
+					// Assistant messages persist as {type:"message", message:{role:"assistant"}}
+					// (session-manager appendMessage) — there is no type:"assistant".
+					return fresh.slice(lastIdx + 1).some((e) => e.type === "message" && e.message?.role === "assistant");
+				},
+				180_000,
+				"wake",
+			);
+			ok(!!woke, "L: parent woke (assistant entry after result delivery)");
+			// Dedup within the process: exactly 2 result messages total.
+			const finalMsgs = bgResults(readSessionEntries(sessionFile));
+			ok(finalMsgs.length === 2, `L: exactly 2 delivered result messages (got ${finalMsgs.length})`);
+		}
+		await stop(pi);
+		}
+	}
+
+	// ── Scenario M: kill/restart — reconcile delivers exactly once ──────
+	{
+		if (runScenario("M")) {
+		const dir = makeWorkspace();
+		const sessionFile = path.join(dir, "e2e-session.jsonl");
+		const pi1 = startPi(dir, { session: sessionFile });
+		await pi1.prompt(
+				"Call the delegate tool ONCE with background=true, task='Run this exact shell command and wait for it to complete: sleep 90. Only after it completes, create a file named slow.txt containing the word DONE.' description='Slow background write test'. The call returns immediately; reply with exactly: SPAWNED.",
+				300_000,
+			);
+		const created = await waitFor(
+			() => bgLedger(readSessionEntries(sessionFile)).find((e) => e.data?.type === "created"),
+			120_000,
+			"created entry",
+		);
+		ok(!!created, "M: created ledger entry persisted");
+		const runId = created?.data?.runId;
+		const running = runId ? await awaitReceipt((m) => m.runId === runId && typeof m.pid === "number", 120_000) : null;
+		ok(!!running, "M: background receipt running with pid");
+		// Kill the parent; children die with it (stdin EOF / shutdown cancel).
+		await stop(pi1);
+		if (running?.pid) {
+			await waitFor(() => {
+				try {
+				process.kill(running.pid, 0);
+				return false;
+				} catch {
+				return true;
+				}
+			}, 60_000, "child exit");
+		}
+		// Restart on the SAME session file: startup orphan-marking + R12
+		// reconcile deliver the undelivered terminal exactly once.
+		const pi2 = startPi(dir, { session: sessionFile });
+		await pi2.prompt("/delegate status", 60_000);
+		const delivered = await waitFor(
+			() => {
+				const msgs = bgResults(readSessionEntries(sessionFile));
+				return msgs.length >= 1 ? msgs : null;
+			},
+			180_000,
+			"reconcile delivery",
+		);
+		ok(!!delivered, "M: restart reconcile delivered the terminal result");
+		if (delivered && runId) {
+			const mine = delivered.filter((m) => m.details?.runId === runId);
+			ok(mine.length === 1, `M: exactly one result message for ${runId} (got ${mine.length})`);
+			const state = mine[0]?.details?.state;
+			ok(["cancelled", "crashed", "timed_out_hard", "timed_out_idle"].includes(state), `M: interrupted state delivered (got ${state})`);
+			ok(String(mine[0]?.content ?? "").includes("internal work event"), "M: envelope present on the reconciled delivery");
+			const fin = bgLedger(readSessionEntries(sessionFile)).filter((e) => e.data?.type === "finished" && e.data?.runId === runId);
+			ok(fin.length === 1, `M: exactly one finished entry appended (got ${fin.length})`);
+			// No re-delivery on a further reconcile: send another command and
+			// recount (dedup is the R12 invariant).
+			await pi2.prompt("/delegate status", 60_000);
+			const after = bgResults(readSessionEntries(sessionFile)).filter((m) => m.details?.runId === runId);
+			ok(after.length === 1, `M: no duplicate after second reconcile (got ${after.length})`);
+		}
+		await stop(pi2);
 		}
 	}
 

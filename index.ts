@@ -44,6 +44,18 @@ import { renderToolCallCard, renderToolPlainCard, renderToolResultCard, type Too
 import { RunningView, type RunningViewState } from "./ui/running-view.ts";
 import { PeekView } from "./ui/peek-view.ts";
 import { FeedRing, feedEventsFromTranscript, renderFeedEvents } from "./transcript-feed.ts";
+import {
+	BackgroundManager,
+	BACKGROUND_RESULT_TYPE,
+	backgroundResultDisplay,
+	formatBackgroundDetailText,
+	formatBackgroundInventoryText,
+	formatBackgroundStartedText,
+	makeReceiptReader,
+	validateBackgroundDescription,
+	type BackgroundDetailView,
+	type BackgroundLiveView,
+} from "./background.ts";
 
 /** Stable command-driven handoff custom message type (§6.4). */
 const HANDOFF_CUSTOM_TYPE = "delegate-handoff";
@@ -184,6 +196,39 @@ export default function delegateExtension(pi: ExtensionAPI) {
 	// Startup orphan recovery (§10.6): receipts only; never kills PIDs.
 	app.markOrphansOnStartup();
 
+	// R15: footer state — composes strict-mode + live background count.
+	let liveBgCount = 0;
+	let footerUi: { setStatus(key: string, text?: string): void } | null = null;
+	const refreshFooter = () => {
+		const parts: string[] = [];
+		if (app.isStrict()) parts.push("delegate: strict");
+		if (liveBgCount > 0) parts.push(`▴${liveBgCount}bg`);
+		try {
+			footerUi?.setStatus("delegate", parts.length ? parts.join(" · ") : undefined);
+		} catch {
+			// headless: no footer
+		}
+	};
+
+	// R8–R13: background run manager. Delivery + ledger writes are ports so
+	// the manager stays Pi-free and unit-testable; formatRunText is captured
+	// by closure (defined below, called only at terminal delivery).
+	const background = new BackgroundManager({
+		sendMessage: (message, options) => {
+			pi.sendMessage(message, options);
+		},
+		appendEntry: (customType, data) => {
+			pi.appendEntry(customType, data);
+		},
+		maxBackgroundRuns: () => app.backgroundLimit(),
+		formatRun: (res) => formatRunText(res),
+		readReceipt: makeReceiptReader(agentDir),
+		onInventoryChange: (count) => {
+			liveBgCount = count;
+			refreshFooter();
+		},
+	});
+
 	const say = (ctx: { hasUI: boolean; ui: { notify(message: string, level?: "info" | "warning" | "error"): void } }, text: string, level: "info" | "warning" | "error" = "info") => {
 		// Essential output uses stdout (§6.1); notify is supplemental only.
 		// In headless RPC, console.log is captured by the host — surface the
@@ -228,7 +273,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		source: "tool" | "command",
 		ctx: ExtensionContext,
 		timeoutMs?: number,
-		extras?: { model?: string; resumeFrom?: string },
+		extras?: { model?: string; resumeFrom?: string; background?: boolean; description?: string },
 	): DelegateRequest => ({
 		task,
 		role,
@@ -241,6 +286,8 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		...(timeoutMs !== undefined ? { timeoutMs } : {}),
 		...(extras?.model ? { model: extras.model } : {}),
 		...(extras?.resumeFrom ? { resumeFrom: extras.resumeFrom } : {}),
+		...(extras?.background ? { background: true } : {}),
+		...(extras?.description ? { description: extras.description } : {}),
 	});
 
 	const refreshDoctor = (ctx: ExtensionContext) => {
@@ -367,6 +414,17 @@ export default function delegateExtension(pi: ExtensionAPI) {
 				"(earlier turns included) with your task as the continuation prompt — no cold re-explanation. " +
 				"Works for runs whose receipt records a sessionPath (post-0.2.0) and whose session file still exists.",
 		})),
+		background: Type.Optional(Type.Boolean({
+			description:
+				"Run this delegation in the background: the call returns a runId immediately and the terminal report " +
+				"arrives later as a message. Use it for long builds, test matrices, or research that should not block " +
+				"this turn. Requires 'description'. Poll with the delegate_status pattern or wait for the report message.",
+		})),
+		description: Type.Optional(Type.String({
+			description:
+				"Required with background=true: a 3-to-6-word purpose summary for the user, e.g. 'Run full test matrix'. " +
+				"Describes the work, not the mechanism. Single line.",
+		})),
 	});
 
 	pi.registerTool({
@@ -382,6 +440,9 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			"Pass the objective, relevant paths, constraints, and acceptance criteria in the delegate task text; the child cannot see parent history.",
 			"Do not use delegate for trivial one-step work, or when most of the parent history would have to be copied into the task.",
 			"Parallel delegate calls are fine: they queue and run back-to-back (one child at a time) — every call gets a real result; do not re-issue on 'queue full', wait for the in-flight results instead.",
+			"Use background=true (with a 3–6-word description) for long builds, test matrices, or research that should not block this turn: the call returns a runId immediately and the terminal report arrives later as a message. Check progress with delegate_status; do not wait inline.",
+			"Treat background terminal reports as internal work events: acknowledge them to the user with at most one line; do not re-narrate the handoff unless material.",
+			"On E_BACKGROUND_FULL, do not re-issue the task: check delegate_status and wait for terminal reports to free slots.",
 			"A timed-out run leaves a partialHandoff, a git checkpoint and a resumable child session: pass resumeFrom: <runId> to continue in the same context instead of re-explaining, and inspect the receipt's gitDelta before repairing anything.",
 			"Pin model: 'provider/model-id' when the child must not silently follow the parent's current model (e.g. after a mid-session model fallback).",
 			"For long validation/benchmark subtasks set timeout to at least 2x the longest expected single tool call.",
@@ -397,14 +458,62 @@ export default function delegateExtension(pi: ExtensionAPI) {
 				} catch (error) {
 					return {
 						content: [{ type: "text" as const, text: (error as Error).message }],
+					details: {} satisfies Record<string, unknown>,
+					isError: true,
+					};
+				}
+			}
+			const modelExtra = typeof params.model === "string" && params.model.trim() ? params.model.trim() : undefined;
+			const resumeExtra = typeof params.resumeFrom === "string" && params.resumeFrom.trim() ? params.resumeFrom.trim() : undefined;
+
+			// R8: background path — validate, slot-check, spawn, return runId.
+			if (params.background === true) {
+				const desc = validateBackgroundDescription(params.description);
+				if (!desc.ok) {
+					return {
+						content: [{ type: "text" as const, text: `description invalid: ${desc.error}` }],
 						details: {} satisfies Record<string, unknown>,
 						isError: true,
 					};
 				}
+				const slot = background.slotError();
+				if (slot) {
+						return {
+						content: [{ type: "text" as const, text: `${slot.code}: ${slot.message}` }],
+						details: { background: true, busy: true } satisfies Record<string, unknown>,
+						isError: true,
+					};
+				}
+				const request = buildRequest(params.task, params.role ?? config.defaultRole, "tool", ctx, timeoutMs, {
+					model: modelExtra,
+					resumeFrom: resumeExtra,
+					background: true,
+					description: desc.value,
+				});
+				refreshDoctor(ctx);
+				const attempt = app.runBackground(request);
+				if ("error" in attempt) {
+					return {
+						content: [{ type: "text" as const, text: formatRunText(attempt.error) }],
+						details: attempt.error.details satisfies DelegateDetails,
+						isError: true,
+					};
+				}
+				background.register(attempt.handle);
+				return {
+					content: [{ type: "text" as const, text: formatBackgroundStartedText(attempt.handle.runId, attempt.handle.role, attempt.handle.description) }],
+					details: {
+						runId: attempt.handle.runId,
+						role: attempt.handle.role,
+						background: true,
+						description: attempt.handle.description,
+					} satisfies Record<string, unknown>,
+				};
 			}
+
 			const request = buildRequest(params.task, params.role ?? config.defaultRole, "tool", ctx, timeoutMs, {
-				model: typeof params.model === "string" && params.model.trim() ? params.model.trim() : undefined,
-				resumeFrom: typeof params.resumeFrom === "string" && params.resumeFrom.trim() ? params.resumeFrom.trim() : undefined,
+				model: modelExtra,
+				resumeFrom: resumeExtra,
 			});
 			refreshDoctor(ctx);
 			const hooks = {
@@ -485,6 +594,105 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	// ── R14: delegate_status tool (background inventory / run detail) ─────
+
+	const backgroundLiveViews = (): BackgroundLiveView[] =>
+		background.liveRuns().map((r) => {
+			const stream = app.getBackgroundStream(r.runId);
+			return {
+				runId: r.runId,
+				role: r.role,
+				description: r.description,
+				detached: r.detached,
+				...(stream?.update ? { phase: stream.update.phase, elapsedMs: stream.update.elapsedMs, ...(stream.update.openTools?.length ? { openTools: stream.update.openTools } : {}), ...(stream.update.model ? { model: stream.update.model } : {}) } : {}),
+			};
+		});
+
+	const backgroundStatusText = (): string =>
+		formatBackgroundInventoryText({
+			limit: app.backgroundLimit(),
+			live: backgroundLiveViews(),
+			queue: app.queuedRunCount(),
+			recent: app.backgroundRecentRuns(3),
+		});
+
+	const backgroundDetailText = (runId: string, limit?: number): string => {
+		const receipt = (() => {
+			try {
+				return app.inspect(runId, false).metadata;
+			} catch {
+				return null;
+			}
+		})();
+		const stream = app.getBackgroundStream(runId);
+		if (!receipt && !stream) return `[delegate background] unknown run ${runId}`;
+		const maxEvents = limit ?? 8;
+		let activityTail: string[] = [];
+		if (stream && stream.events.length > 0) {
+			activityTail = renderFeedEvents([...stream.events], { startMs: Date.now() - (stream.update?.elapsedMs ?? 0), maxChars: 140, maxEvents }).slice(-maxEvents);
+		} else if (receipt?.transcriptPath) {
+			try {
+				const { startMs, events } = feedEventsFromTranscript(receipt.transcriptPath);
+			activityTail = renderFeedEvents(events, { startMs, maxChars: 140, maxEvents }).slice(-maxEvents);
+			} catch {
+				// transcript read is best-effort
+			}
+		}
+		const live = stream?.update ? { phase: stream.update.phase, elapsedMs: stream.update.elapsedMs, ...(stream.update.openTools?.length ? { openTools: stream.update.openTools } : {}) } : undefined;
+		return formatBackgroundDetailText({
+			runId,
+			role: (receipt?.role ?? background.liveRuns().find((r) => r.runId === runId)?.role ?? "general") as "general" | "research",
+			...(receipt?.description ? { description: receipt.description } : {}),
+			state: (receipt?.state ?? "running") as never,
+			...(receipt?.model ? { model: receipt.model } : {}),
+			...(receipt?.startedAt ? { startedAt: receipt.startedAt } : {}),
+			...(receipt?.finishedAt ? { finishedAt: receipt.finishedAt } : {}),
+			...(receipt?.startedAt && receipt?.finishedAt ? { durationMs: Date.parse(receipt.finishedAt) - Date.parse(receipt.startedAt) } : {}),
+			...(live ? { live } : {}),
+			activityTail,
+			...(receipt?.finalHandoff ? { handoffPreview: receipt.finalHandoff } : receipt?.partialHandoff ? { handoffPreview: receipt.partialHandoff } : {}),
+			...(receipt?.sessionPath ? { sessionPath: receipt.sessionPath } : {}),
+			background: true,
+		});
+	};
+
+	const DelegateStatusParams = Type.Object({
+		runId: Type.Optional(Type.String({ description: "Optional runId returned by a background delegate call. Omit to list all background runs." })),
+		limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Optional cap for recent-activity lines (default 8)." })),
+	});
+
+	pi.registerTool({
+		name: "delegate_status",
+		label: "Background run status",
+		description:
+			"Check asynchronous (background) delegate runs. Without runId: slot usage, every live background run (state, elapsed, in-flight tool), and the recent terminal runs. " +
+			"With runId: one run's detail — live activity tail or post-mortem feed, handoff preview, and the resumeFrom hint for interrupted runs. " +
+			"Background runs deliver their terminal report as a message automatically; this tool is for checking progress, not for waiting.",
+		promptSnippet: "Check background delegate runs (inventory or one run's detail)",
+		promptGuidelines: [
+			"Poll delegate_status sparingly — background terminal reports arrive as messages on their own; do not busy-poll.",
+		],
+		parameters: DelegateStatusParams,
+		async execute(_toolCallId, params) {
+			const runId = typeof params.runId === "string" ? params.runId.trim() : "";
+			const text = runId
+				? backgroundDetailText(runId, typeof params.limit === "number" ? params.limit : undefined)
+				: backgroundStatusText();
+			return { content: [{ type: "text" as const, text }], details: { runId: runId || undefined } satisfies Record<string, unknown> };
+		},
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		renderCall(args: any, theme: any) {
+			const runId = typeof args.runId === "string" && args.runId ? args.runId.slice(-12) : "all";
+			return renderToolCallCard(theme, { title: "delegate_status", subject: "background", qualifier: runId });
+		},
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		renderResult(result: any, theme: any) {
+			const text = (result.content ?? []).map((c: { text?: string }) => c.text ?? "").filter(Boolean).join("\n");
+			const first = text.split("\n").slice(0, 6).join("\n");
+			return renderToolPlainCard(first || text);
+		},
+	});
+
 	// ── Handoff custom message renderer (§6.4) ─────────────────────────────
 
 	pi.registerMessageRenderer(HANDOFF_CUSTOM_TYPE, (message: { content?: string | unknown[]; details?: unknown }) => {
@@ -495,6 +703,18 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			: Array.isArray(raw) ? raw.map((b) => (b as { text?: string })?.text ?? "").join("\n")
 			: "";
 		return new Text(`[delegate ${d.runId ?? "?"} · ${d.role ?? "?"} · ${d.state ?? "?"}]\n\n${text}`, 0, 0);
+	});
+
+	// ── R15: background result renderer (neutral glyph+word, no model-only text)
+
+	pi.registerMessageRenderer(BACKGROUND_RESULT_TYPE, (message: { content?: string | unknown[]; details?: unknown }) => {
+		const d = (message.details ?? {}) as { runId?: string; state?: string; description?: string };
+		const raw = message.content;
+		const text =
+			typeof raw === "string" ? raw
+			: Array.isArray(raw) ? raw.map((b) => (b as { text?: string })?.text ?? "").join("\n")
+			: "";
+		return new Text(backgroundResultDisplay(text, d), 0, 0);
 	});
 
 	// ── Command execution ───────────────────────────────────────────────────
@@ -673,6 +893,10 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			"/delegate paths                    config + run store paths",
 			"/delegate doctor                 diagnostics",
 			"/delegate help                   this help",
+			"",
+			"Background runs: delegate({ background: true, description: … }) spawns and returns",
+			"immediately; the terminal report arrives as a message. Models poll the",
+			"delegate_status tool; the dashboard shows live background runs.",
 		].join("\n");
 
 	const doctorText = (): string => {
@@ -742,7 +966,21 @@ export default function delegateExtension(pi: ExtensionAPI) {
 				}
 				case "cancel": {
 					const res = await app.cancel(intent.runId);
-					say(ctx, `[delegate] ${res.message}`, res.ok ? "info" : "warning");
+					if (res.ok) {
+						say(ctx, `[delegate] ${res.message}`);
+						return;
+					}
+					// R8: background runs cancel by explicit runId (no foreground active).
+					if (intent.runId && background.cancel(intent.runId)) {
+						say(ctx, `[delegate] Cancellation requested for background run ${intent.runId}.`);
+						return;
+					}
+					const live = background.liveRuns();
+					if (live.length > 0) {
+						say(ctx, `[delegate] No foreground run active. Live background runs: ${live.map((r) => r.runId).join(", ")} — cancel with /delegate cancel <run-id>.`, "warning");
+						return;
+					}
+					say(ctx, `[delegate] ${res.message}`, "warning");
 					return;
 				}
 				case "inspect":
@@ -937,6 +1175,30 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			sections.push({ title: "Live", rows });
 		}
 
+		// R15: background runs section (live + recent terminal).
+		{
+			const bgLive = backgroundLiveViews();
+			const bgRecent = app.backgroundRecentRuns(3);
+			if (bgLive.length > 0 || bgRecent.length > 0) {
+				const rows: PanelRow[] = [];
+				for (const r of bgLive) {
+					const g = r.phase ? stateGlyph(r.phase.startsWith("tool:") ? "running" : r.phase) : stateGlyph("starting");
+					rows.push({
+						key: `bg-${r.runId}`,
+						label: `${g.glyph} ${r.role}`,
+						value: `${r.description}${r.elapsedMs !== undefined ? ` · ${Math.round(r.elapsedMs / 1000)}s` : ""}${r.openTools?.length ? ` · ⏳ ${r.openTools.slice(0, 2).join(",")}` : ""}${r.detached ? " · branch inactive" : ""}`,
+						kind: "info",
+					});
+				}
+				for (const r of bgRecent) {
+					const g = stateGlyph(r.state as never);
+					rows.push({ key: `bg-last-${r.runId}`, label: `${g.glyph} last`, value: `${r.role} ${g.word}${r.durationMs != null ? ` · ${Math.round(r.durationMs / 1000)}s` : ""} · ${r.runId.slice(-12)}`, kind: "info", valueStyle: "muted" });
+				}
+				rows.push({ key: "bg-slots", label: "Slots", value: `${bgLive.length}/${app.backgroundLimit()} active`, kind: "info", valueStyle: "muted" });
+				sections.push({ title: "Background runs", rows });
+			}
+		}
+
 		sections.push({
 			title: "Actions",
 			rows: [
@@ -1096,9 +1358,10 @@ export default function delegateExtension(pi: ExtensionAPI) {
 
 	// ── 7. Lifecycle ────────────────────────────────────────────────────────
 
-	const hydrateFromSession = (ctx: ExtensionContext) => {
+	const hydrateFromSession = (ctx: ExtensionContext): SessionEntryLike[] => {
+		let branch: SessionEntryLike[] = [];
 		try {
-			const branch = ctx.sessionManager.getBranch() as SessionEntryLike[];
+			branch = ctx.sessionManager.getBranch() as SessionEntryLike[];
 			app.hydrateFromBranch(branch);
 		} catch (error) {
 			// Replay failure keeps the stricter of both states (§8.2).
@@ -1106,6 +1369,8 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		}
 		if (app.isStrict()) {
 			ctx.ui.setStatus("delegate", "delegate: strict");
+			footerUi = ctx.ui;
+			refreshFooter();
 			// Repair visibility immediately in case the session had drifted.
 			try {
 				syncStrictToolSet(app.getModeRuntime(), pi.getActiveTools(), () => pi.setActiveTools(["delegate"]));
@@ -1113,11 +1378,24 @@ export default function delegateExtension(pi: ExtensionAPI) {
 				// gate remains authoritative
 			}
 		}
+		footerUi = ctx.ui;
+		refreshFooter();
 		refreshDoctor(ctx);
+		return branch;
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
 		hydrateFromSession(ctx);
+		// R12/R13: adopt the branch; deliver undelivered terminals once.
+		try {
+			const branch = ctx.sessionManager.getBranch() as SessionEntryLike[];
+			const { resent, notes } = background.start(branch);
+			if (resent.length > 0 || notes.length > 0) {
+				console.log(`[delegate] background reconcile: ${resent.length} resent${notes.length ? `; ${notes.join("; ")}` : ""}`);
+			}
+		} catch (error) {
+			console.log(`[delegate] background reconcile failed: ${(error as Error).message}`);
+		}
 		if ((unknownKeys.length > 0 || recoveredFromCorrupt) && ctx.hasUI) {
 			const parts: string[] = [];
 			if (unknownKeys.length > 0) parts.push(`unknown config keys ignored: ${unknownKeys.join(", ")}`);
@@ -1126,9 +1404,24 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		}
 	});
 
+	pi.on("session_before_tree", async () => {
+		// R13: no background delivery while a tree switch is in flight.
+		background.beforeTree();
+	});
+
 	pi.on("session_tree", async (_event, ctx) => {
 		// Branch navigation: mode follows the new leaf (§8.2, E2E-03).
 		hydrateFromSession(ctx);
+		// R12/R13: re-adopt the new branch, resume buffered delivery.
+		try {
+			const branch = ctx.sessionManager.getBranch() as SessionEntryLike[];
+			const { resent, notes } = background.afterTree(branch);
+			if (resent.length > 0 || notes.length > 0) {
+				console.log(`[delegate] background re-adopt: ${resent.length} resent${notes.length ? `; ${notes.join("; ")}` : ""}`);
+			}
+		} catch (error) {
+			console.log(`[delegate] background re-adopt failed: ${(error as Error).message}`);
+		}
 	});
 
 	pi.on("before_agent_start", async (event: { systemPrompt?: string }, ctx) => {
@@ -1150,8 +1443,9 @@ export default function delegateExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		// Owned child gets cancelled; UI indicators cleared.
+		// Owned children get cancelled; UI indicators cleared.
 		app.cancelActiveOnShutdown();
+		background.shutdown();
 		try {
 			ctx.ui.setStatus("delegate", undefined);
 		} catch {

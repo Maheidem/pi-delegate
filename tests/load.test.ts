@@ -37,19 +37,19 @@ function mockPi() {
 	const commands: string[] = [];
 	const tools: string[] = [];
 	const events: string[] = [];
-	let messageRenderer: string | undefined;
+	const messageRenderers: string[] = [];
 	return {
 		commands,
 		tools,
 		events,
-		get messageRenderer() {
-			return messageRenderer;
+		get messageRenderers() {
+			return messageRenderers;
 		},
 		registerCommand: (name: string) => commands.push(name),
 		registerTool: (def: { name: string }) => tools.push(def.name),
 		on: (event: string) => events.push(event),
 		registerMessageRenderer: (type: string) => {
-			messageRenderer = type;
+			messageRenderers.push(type);
 		},
 	};
 }
@@ -61,8 +61,10 @@ test("load: registers exactly /delegate + delegate tool (no aliases)", async () 
 	const pi = mockPi();
 	(factory as (pi: unknown) => void)(pi);
 	assert.deepEqual(pi.commands, ["delegate"]);
-	assert.deepEqual(pi.tools, ["delegate"]);
-	assert.equal(pi.messageRenderer, "delegate-handoff");
+	// R14 (async spec): delegate_status joins the registration inventory.
+	assert.deepEqual(pi.tools, ["delegate", "delegate_status"]);
+	// R15 (async spec): delegate-background-result joins the renderers.
+	assert.deepEqual(pi.messageRenderers, ["delegate-handoff", "delegate-background-result"]);
 	for (const ev of ["tool_call", "session_start", "session_tree", "before_agent_start", "turn_start", "session_shutdown"]) {
 		assert.ok(pi.events.includes(ev), `missing handler ${ev}`);
 	}

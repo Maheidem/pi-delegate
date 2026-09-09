@@ -1,0 +1,27 @@
+{
+	"schemaVersion": 1,
+	"feature": "async/background delegation (SPEC R8–R19)",
+	"milestones": {
+		"M1": {
+			"status": "gate-passed",
+			"gate": "typecheck clean; unit 162/162 (143 pre-existing unmodified + 19 new in tests/background.test.ts); e2e L 10/10; e2e M 8/8 (model zai/glm-5.3, DELEGATE_E2E_MODEL override)",
+			"requirements": ["R8 background execution", "R9 maxBackgroundRuns default 3 fail-fast", "R10 terminal delivery steer+triggerTurn", "R11 session ledger branch-scoped", "R12 at-least-once + dedup + reconcile", "R13 generation guard + tree pause + shutdown cancel"],
+			"evidence": [
+				{
+					"file": "m1/e2e-session-1.jsonl",
+					"what": "Scenario L session: 2 delegate.background created + 2 finished entries, 2 delivered delegate-background-result messages (envelope + kind=result + distinct runIds), assistant wake reply (type:message, role:assistant) after last delivery, exactly 2 result messages (no dupes)"
+				},
+				{
+					"file": "m1/e2e-session-2.jsonl",
+					"what": "Scenario M session: created entry from killed parent; after restart reconcile exactly 1 delivered result (state=crashed via interrupted path), 1 finished entry, no duplicate after second reconcile"
+				},
+				{
+					"file": "runs/del_20260909T180326Z_652e94fb.json",
+					"note": "wake-diagnosis delegation receipt (research role) that fixed the L assertion: assistant messages persist as type:message + message.role — no type:assistant exists in session format"
+				}
+			],
+			"knownGaps": [],
+			"notes": "wake verification: pi.sendMessage steer+triggerTurn wakes idle RPC-mode agents (dist/core/agent-session.js:1099-1126 idle+triggerTurn → _runAgentPrompt, no TUI gate). Delivery call unchanged; only the e2e predicate was corrected."
+		}
+	}
+}

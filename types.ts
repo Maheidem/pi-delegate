@@ -47,6 +47,7 @@ export const DELEGATE_ERROR_CODES = [
 	"E_TIMEOUT_HARD",
 	"E_MODE_PERSIST",
 	"E_TOOL_RESTORE",
+	"E_BACKGROUND_FULL",
 	"E_ORPHANED_RUN",
 ] as const;
 export type DelegateErrorCode = (typeof DELEGATE_ERROR_CODES)[number];
@@ -81,8 +82,8 @@ export interface DelegateUsage {
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
+	contextTokens?: number;
 	cost: number;
-	contextTokens: number;
 	turns: number;
 }
 
@@ -120,6 +121,10 @@ export interface DelegateRequest {
 	projectRoot?: string;
 	/** R3: resume a prior run's child session (its session file is re-entered). */
 	resumeFrom?: string;
+	/** R8: run as a background delegation (non-blocking tool call). */
+	background?: boolean;
+	/** R8: 3–6-word purpose summary, required when background. */
+	description?: string;
 }
 
 /** Bounded, parent-visible tool result details (schema v1). */
@@ -229,6 +234,10 @@ export interface RunMetadataV1 {
 	stderrPath: string;
 	/** Present only on manually curated receipts (one-time data repair). */
 	curationNote?: string;
+	/** R8: this run was spawned as a background delegation. */
+	background?: boolean;
+	/** R8: validated 3–6-word purpose summary (background runs). */
+	description?: string;
 }
 
 export interface TranscriptRecordV1 {
@@ -278,6 +287,45 @@ export interface SessionEntryLike {
 	type?: unknown;
 	customType?: unknown;
 	data?: unknown;
+	/** Custom messages carry their delivery details (R12 dedup scans). */
+	details?: unknown;
+}
+
+/** R11: `delegate.background` ledger entries (schema v1, session JSONL). */
+export interface BackgroundCreatedEntry {
+	v: 1;
+	type: "created";
+	runId: string;
+	role: RoleName;
+	description: string;
+	createdAt: string;
+}
+
+export interface BackgroundFinishedEntry {
+	v: 1;
+	type: "finished";
+	runId: string;
+	state: RunTerminalState;
+	finishedAt: string;
+}
+
+export type BackgroundLedgerEntry = BackgroundCreatedEntry | BackgroundFinishedEntry;
+
+/** R8: projected background-run state on the current branch. */
+export interface BackgroundRunRecord {
+	created: BackgroundCreatedEntry;
+	finished?: BackgroundFinishedEntry;
+}
+
+/** R8: live handle for a background run spawned by this session. */
+export interface BackgroundRunHandle {
+	runId: string;
+	role: RoleName;
+	description: string;
+	/** Cancels the child (R13 shutdown / user cancel). */
+	cancel: (reason?: string) => void;
+	/** Resolves with the terminal DelegateRunResult (never rejects). */
+	completion: Promise<DelegateRunResult>;
 }
 
 export interface ModeReplayResult {
@@ -432,6 +480,10 @@ export interface DelegateApplication {
 	enableStrict(ctx: ModeTransitionContext): Promise<ModeResult>;
 	disableStrict(ctx: ModeTransitionContext): Promise<ModeResult>;
 	run(request: DelegateRequest, hooks?: RunHooks): Promise<RunAttemptResult>;
+	/** R8: spawn a background run (no slot reservation, no queue). Returns a
+	 * validation error result, or a live handle whose completion resolves at
+	 * the terminal state. */
+	runBackground(request: DelegateRequest): { error: DelegateRunResult } | { handle: BackgroundRunHandle };
 	cancel(runId?: string): Promise<CancelResult>;
 	inspect(runId?: string, includeTranscript?: boolean): RunInspection;
 	doctor(): DoctorReport;

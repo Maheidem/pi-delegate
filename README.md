@@ -150,6 +150,39 @@ Consequences worth internalizing:
   than blamed on the provider, and the stderr tail is no longer presented as
   the cause.
 
+### Background delegation (v0.5.0, R8–R15)
+
+`delegate({ background: true, description: "…" })` runs the delegation
+**asynchronously**: the tool call returns a runId immediately, the parent turn
+continues, and the terminal report is delivered later as a message that wakes
+an idle parent (`deliverAs: "steer"`, `triggerTurn: true`) or steers a busy
+one. The envelope explicitly tells the parent model to treat reports as
+internal work events.
+
+- **Concurrency**: up to `maxBackgroundRuns` (default 3, clamp 1–8, dashboard +
+  project overlay) children run **in parallel**, separate from the foreground
+  one-child queue. Overflow fails fast with `E_BACKGROUND_FULL` — background
+  calls are never queued.
+- **`description`** is required (3–6 words, single line) and rides every header.
+- **Model surface**: the `delegate_status` tool lists live background runs
+  (slots, phase, elapsed, in-flight tool) and per-run detail with the activity
+  tail, handoff preview, and the `resumeFrom` hint for interrupted runs.
+  `/delegate status` prints the same inventory; the dashboard gains a
+  **Background runs** section and the footer shows `▴Nbg`.
+- **Ownership + delivery** (pi-async-fork pattern, no daemon): `delegate.background`
+  custom entries in the session JSONL are the branch-scoped ledger; terminal
+  delivery is at-least-once with details-scan dedup; a restart reconciles the
+  branch, re-delivers undelivered terminals exactly once, reports runs owned
+  by other live sessions, and turns dead-pid orphans into resumable
+  interrupted reports. Branch switches pause delivery; the extension never
+  delivers into a session the run's branch doesn't own.
+- **Rendered results**: delivered reports render as neutral glyph+word cards
+  (`✓ completed / ⚠ failed / ⏱ timed out / ⊘ cancelled`) with the model-only
+  classification sentence stripped from display.
+- Headless note: background works, but a `pi -p` process exit kills in-flight
+  children — receipts finalize interrupted/resumable. Prefer foreground for
+  one-shot headless flows.
+
 ### Concurrent calls queue (fan-out just works)
 
 Models naturally issue several `delegate` calls in one turn. Pi executes

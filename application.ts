@@ -33,12 +33,16 @@ import type {
 	RunStreamUpdate,
 	TranscriptRecordV1,
 	SessionEntryLike,
+	BackgroundRunHandle,
+	RunState,
+	RunTerminalState,
 } from "./types.ts";
 import { FeedRing, type FeedEvent } from "./transcript-feed.ts";
-import { decodeTranscriptRecord } from "./types.ts";
+import { decodeTranscriptRecord, isTerminalRunState } from "./types.ts";
 import { applyProjectOverlay, clampConfigField, formatDuration, normalizeConfig, parseDuration, projectConfigPath, resolveRunTimeouts, saveConfig, saveProjectConfig, type DelegateConfigV1 } from "./config.ts";
 import { EMPTY_USAGE } from "./types.ts";
 import { isRoleName, resolveRole, rolePromptExists, DELEGATE_ROLES } from "./roles.ts";
+import type { DelegateRole } from "./types.ts";
 import {
 	replayModeEntries,
 	applyReplayToRuntime,
@@ -55,6 +59,7 @@ import {
 	enforceRetention,
 	runPaths,
 	pathsForAgentDir,
+	type OpenedRun,
 } from "./run-store.ts";
 import { DelegateRunner, resolvePiInvocation, type PiInvocationResolver } from "./runner.ts";
 import { validateTask } from "./commands.ts";
@@ -118,6 +123,8 @@ export class DelegateApplicationImpl implements DelegateApplication {
 	private activeStream: RunStreamUpdate | null = null;
 	private activeRing: FeedRing = new FeedRing(120);
 	private runQueue: QueuedRun[] = [];
+	/** R14: live stream capture for background runs spawned by this process. */
+	private backgroundStreams = new Map<string, { ring: FeedRing; latest: RunStreamUpdate | null }>();
 	private readonly modeRuntime: ModeRuntime;
 	private readonly ports: DelegateApplicationPorts;
 	private liveConfig: DelegateConfigV1;
@@ -279,110 +286,10 @@ export class DelegateApplicationImpl implements DelegateApplication {
 
 	/** Execute one run in the free slot (reservation stays synchronous). */
 	private async startRun(request: DelegateRequest, hooks: RunHooks = {}): Promise<RunAttemptResult> {
-
+		const prepared = this.prepareRun(request);
+		if ("error" in prepared) return prepared.error;
+		const { opened, role, task, model, cfg, timeoutInfo, modelNote, resumeOf, sessionPath, sessionDir } = prepared;
 		const agentDir = this.ports.agentDir;
-		// Config cascade: project .pi/delegate/config.json overlays the
-		// user-wide (live) config per run; missing file = live config.
-		let baseCfg: DelegateConfigV1 = this.liveConfig;
-		let projectSetsHard = false;
-		if (request.projectRoot) {
-			// Strip the overlay's diagnostic keys so only real config fields
-			// reach the runner (a spurious key would survive into metadata).
-			const overlay = applyProjectOverlay(this.liveConfig, request.projectRoot);
-			const { projectOverrides, projectSetKeys, projectCorrupt, ...rest } = overlay as unknown as DelegateConfigV1 & {
-				projectOverrides: string[];
-				projectSetKeys: string[];
-				projectCorrupt?: string;
-			};
-			void projectSetKeys; // display-only; run resolution uses projectOverrides
-			projectSetsHard = projectOverrides.includes("hardTimeoutMs");
-			baseCfg = { ...(rest as unknown as DelegateConfigV1) } as DelegateConfigV1;
-		}
-
-		// Timeout resolution: per-invocation > project > user (baseCfg carries
-		// the project overlay). Inactivity is capped at half of hard for ANY
-		// source, so a long-silent child can never outlive its watchdog. A
-		// per-run copy so overrides never leak into later runs.
-		const timeouts = resolveRunTimeouts(baseCfg, request.timeoutMs);
-		const cfg: DelegateConfigV1 = {
-			...baseCfg,
-			hardTimeoutMs: timeouts.hardMs,
-			inactivityTimeoutMs: timeouts.inactivityMs,
-			stuckToolTimeoutMs: timeouts.stuckToolMs,
-		};
-		// R7: timeout provenance for the result header, e.g.
-		// "hard 45m (per-run) · idle 22m30s · stuck-tool 45m".
-		const timeoutInfo =
-			`hard ${formatDuration(timeouts.hardMs)} (${request.timeoutMs !== undefined ? "per-run" : projectSetsHard ? "project" : "user"})` +
-			` · idle ${formatDuration(timeouts.inactivityMs)}` +
-			` · stuck-tool ${formatDuration(timeouts.stuckToolMs)}`;
-
-		// 2. Validate task (line endings, blank, byte limit).
-		const taskResult = validateTask(request.task, cfg.maxTaskBytes);
-		if (typeof taskResult !== "string") {
-			return errorResult("", isRoleName(request.role) ? request.role : "general", "E_INVALID_TASK", `Task invalid: ${taskResult.error}`);
-		}
-		const task = taskResult;
-
-		// 3. Role (closed catalogue).
-		if (!isRoleName(request.role)) {
-			return errorResult("", "general", "E_INVALID_ROLE", `Unknown role '${String(request.role)}'. Use 'general' or 'research'.`);
-		}
-		const role = resolveRole(request.role, cfg.defaultRole);
-
-		// 4. Project trust for the write-capable general role.
-		if (role.name === "general" && !request.projectTrusted) {
-			return errorResult("", role.name, "E_PROJECT_UNTRUSTED", "Project is not trusted; a write-capable child cannot run. Approve trust or use the research role.");
-		}
-
-		// 5. Model resolution (R5): an explicit `model` pin wins; otherwise
-		// the parent's current model is inherited as before.
-		const model = request.model?.trim() || request.parentModel?.trim();
-		if (!model) {
-			return errorResult("", role.name, "E_MODEL_UNAVAILABLE", "No parent model available to inherit. Select or configure a model, or pass an explicit child model.");
-		}
-		const modelNote = request.model?.trim() && request.model!.trim() !== request.parentModel?.trim()
-			? `child model pinned to ${request.model!.trim()} (parent model ${request.parentModel || "none"} not inherited)`
-			: undefined;
-
-		// R3: resume — re-enter a prior run's durable child session.
-		let resumeOf: string | undefined;
-		let sessionPath: string | undefined;
-		if (request.resumeFrom) {
-			const prior = readRunMetadata(agentDir, request.resumeFrom);
-			if (!prior) {
-				return errorResult("", role.name, "E_STORE", `resumeFrom: no receipt for run ${request.resumeFrom}.`);
-			}
-			if (!prior.sessionPath || !fs.existsSync(prior.sessionPath)) {
-				return errorResult("", role.name, "E_STORE", `resumeFrom: run ${request.resumeFrom} has no durable child session on disk (pre-0.2.0 runs are not resumable).`);
-			}
-			resumeOf = prior.runId;
-			sessionPath = prior.sessionPath;
-		}
-
-		// 6. Role prompt readability.
-		if (!rolePromptExists(role)) {
-			return errorResult("", role.name, "E_STORE", `Role prompt asset is unreadable for role '${role.name}'.`);
-		}
-
-		// 7. Open run store entry (atomic, 0700/0600).
-		let opened;
-		try {
-			opened = openRun(agentDir, { ...request, task, role: role.name });
-		} catch (error) {
-			return errorResult("", role.name, "E_STORE", `Run store could not initialize: ${(error as Error).message}`);
-		}
-
-		// R3: durable session storage for new runs (resumed runs re-enter
-		// the prior session file directly).
-		const sessionDir = sessionPath ? undefined : path.join(opened.paths.runsDir, "sessions");
-		if (sessionDir) {
-			try {
-				fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
-			} catch {
-				// session capture is best-effort; the run still proceeds
-			}
-		}
 
 		// 8. Reservation NOW covers the child lifecycle.
 		// Capture live state for the home dashboard while forwarding the caller's hooks.
@@ -424,7 +331,7 @@ export class DelegateApplicationImpl implements DelegateApplication {
 			role: role.name,
 			runner,
 			startedAt: opened.metadata.createdAt,
-			hardMs: timeouts.hardMs,
+			hardMs: cfg.hardTimeoutMs,
 		};
 		this.activeRun = reservation;
 
@@ -445,6 +352,193 @@ export class DelegateApplicationImpl implements DelegateApplication {
 			this.startNextQueuedRun();
 		}
 	}
+	/** R8: spawn a background run — same validation and spawn path as the
+	 * foreground, but no slot reservation, no queue, and the caller gets a
+	 * live handle instead of the terminal result. */
+	runBackground(request: DelegateRequest): { error: DelegateRunResult } | { handle: BackgroundRunHandle } {
+		const prepared = this.prepareRun(request);
+		if ("error" in prepared) return { error: prepared.error };
+		const { opened, role, task, model, cfg, timeoutInfo, modelNote, resumeOf, sessionPath, sessionDir } = prepared;
+		const agentDir = this.ports.agentDir;
+		// R14: capture the live stream for status/dashboard surfaces.
+		const ring = new FeedRing(120);
+		const streamEntry = { ring, latest: null as RunStreamUpdate | null };
+		const runner = new DelegateRunner(
+			opened,
+			{
+				agentDir,
+				role,
+				task,
+				runId: opened.metadata.runId,
+				parentModel: model,
+				thinkingLevel: request.thinkingLevel,
+				cwd: request.cwd,
+				projectTrusted: request.projectTrusted,
+				registeredTools: this.lastRegisteredTools,
+				...(resumeOf ? { resumeOf } : {}),
+				...(sessionPath ? { sessionPath } : {}),
+				...(sessionDir ? { sessionDir } : {}),
+			},
+			cfg,
+			{
+				onUpdate: (u: RunStreamUpdate) => {
+				streamEntry.latest = u;
+			},
+				onEvent: (e: FeedEvent) => {
+					ring.push(e);
+			},
+			},
+			this.ports.resolveInvocation ?? resolvePiInvocation,
+		);
+		this.backgroundStreams.set(opened.metadata.runId, streamEntry);
+		const completion = runner.run().then(
+			(outcome) => {
+				this.backgroundStreams.delete(opened.metadata.runId);
+				try {
+					enforceRetention(agentDir, cfg.maxRuns, cfg.maxRunAgeDays, undefined);
+				} catch {
+					// cleanup failure is warning-only
+				}
+				return outcomeToRunResult(outcome, opened.metadata, role.name, model, request.thinkingLevel, { timeoutInfo, modelNote });
+			},
+			(error: unknown) => {
+				this.backgroundStreams.delete(opened.metadata.runId);
+				return errorResult(opened.metadata.runId, role.name, "E_CHILD_EXIT", `Delegation failed unexpectedly: ${(error as Error).message}`);
+			},
+		);
+		return {
+			handle: {
+				runId: opened.metadata.runId,
+				role: role.name,
+				description: request.description ?? "",
+				cancel: (reason?: string) => runner.cancel((reason ?? "cancelled") as "cancelled"),
+				completion,
+			},
+		};
+	}
+
+	/** Validation + open (steps 1–7) shared by the foreground and background
+	 * spawn paths. Returns a terminal error result or the prepared context. */
+	private prepareRun(request: DelegateRequest):
+		| { error: DelegateRunResult }
+		| {
+			opened: OpenedRun;
+			role: DelegateRole;
+			task: string;
+			model: string;
+			cfg: DelegateConfigV1;
+			timeoutInfo: string;
+			modelNote: string | undefined;
+			resumeOf: string | undefined;
+			sessionPath: string | undefined;
+			sessionDir: string | undefined;
+		} {
+		const agentDir = this.ports.agentDir;
+		// Config cascade: project .pi/delegate/config.json overlays the
+		// user-wide (live) config per run; missing file = live config.
+		let baseCfg: DelegateConfigV1 = this.liveConfig;
+		let projectSetsHard = false;
+		if (request.projectRoot) {
+			// Strip the overlay's diagnostic keys so only real config fields
+			// reach the runner (a spurious key would survive into metadata).
+			const overlay = applyProjectOverlay(this.liveConfig, request.projectRoot);
+			const { projectOverrides, projectSetKeys, projectCorrupt, ...rest } = overlay as unknown as DelegateConfigV1 & {
+				projectOverrides: string[];
+				projectSetKeys: string[];
+				projectCorrupt?: string;
+			};
+			void projectSetKeys; // display-only; run resolution uses projectOverrides
+			projectSetsHard = projectOverrides.includes("hardTimeoutMs");
+			baseCfg = { ...(rest as unknown as DelegateConfigV1) } as DelegateConfigV1;
+		}
+
+		// Timeout resolution: per-invocation > project > user (baseCfg carries
+		// the project overlay). Inactivity is capped at half of hard for ANY
+		// source, so a long-silent child can never outlive its watchdog. A
+		// per-run copy so overrides never leak into later runs.
+		const timeouts = resolveRunTimeouts(baseCfg, request.timeoutMs);
+		const cfg: DelegateConfigV1 = {
+			...baseCfg,
+			hardTimeoutMs: timeouts.hardMs,
+			inactivityTimeoutMs: timeouts.inactivityMs,
+			stuckToolTimeoutMs: timeouts.stuckToolMs,
+		};
+		// R7: timeout provenance for the result header, e.g.
+		// "hard 45m (per-run) · idle 22m30s · stuck-tool 45m".
+		const timeoutInfo =
+			`hard ${formatDuration(timeouts.hardMs)} (${request.timeoutMs !== undefined ? "per-run" : projectSetsHard ? "project" : "user"})` +
+			` · idle ${formatDuration(timeouts.inactivityMs)}` +
+			` · stuck-tool ${formatDuration(timeouts.stuckToolMs)}`;
+
+		// 2. Validate task (line endings, blank, byte limit).
+		const taskResult = validateTask(request.task, cfg.maxTaskBytes);
+		if (typeof taskResult !== "string") {
+			return { error: errorResult("", isRoleName(request.role) ? request.role : "general", "E_INVALID_TASK", `Task invalid: ${taskResult.error}`) };
+		}
+		const task = taskResult;
+
+		// 3. Role (closed catalogue).
+		if (!isRoleName(request.role)) {
+			return { error: errorResult("", "general", "E_INVALID_ROLE", `Unknown role '${String(request.role)}'. Use 'general' or 'research'.`) };
+		}
+		const role = resolveRole(request.role, cfg.defaultRole);
+
+		// 4. Project trust for the write-capable general role.
+		if (role.name === "general" && !request.projectTrusted) {
+			return { error: errorResult("", role.name, "E_PROJECT_UNTRUSTED", "Project is not trusted; a write-capable child cannot run. Approve trust or use the research role.") };
+		}
+
+		// 5. Model resolution (R5): an explicit `model` pin wins; otherwise
+		// the parent's current model is inherited as before.
+		const model = request.model?.trim() || request.parentModel?.trim();
+		if (!model) {
+			return { error: errorResult("", role.name, "E_MODEL_UNAVAILABLE", "No parent model available to inherit. Select or configure a model, or pass an explicit child model.") };
+		}
+		const modelNote = request.model?.trim() && request.model!.trim() !== request.parentModel?.trim()
+			? `child model pinned to ${request.model!.trim()} (parent model ${request.parentModel || "none"} not inherited)`
+			: undefined;
+
+		// R3: resume — re-enter a prior run's durable child session.
+		let resumeOf: string | undefined;
+		let sessionPath: string | undefined;
+		if (request.resumeFrom) {
+			const prior = readRunMetadata(agentDir, request.resumeFrom);
+			if (!prior) {
+				return { error: errorResult("", role.name, "E_STORE", `resumeFrom: no receipt for run ${request.resumeFrom}.`) };
+			}
+			if (!prior.sessionPath || !fs.existsSync(prior.sessionPath)) {
+				return { error: errorResult("", role.name, "E_STORE", `resumeFrom: run ${request.resumeFrom} has no durable child session on disk (pre-0.2.0 runs are not resumable).`) };
+			}
+			resumeOf = prior.runId;
+			sessionPath = prior.sessionPath;
+		}
+
+		// 6. Role prompt readability.
+		if (!rolePromptExists(role)) {
+			return { error: errorResult("", role.name, "E_STORE", `Role prompt asset is unreadable for role '${role.name}'.`) };
+		}
+
+		// 7. Open run store entry (atomic, 0700/0600).
+		let opened;
+		try {
+			opened = openRun(agentDir, { ...request, task, role: role.name });
+		} catch (error) {
+			return { error: errorResult("", role.name, "E_STORE", `Run store could not initialize: ${(error as Error).message}`) };
+		}
+
+		// R3: durable session storage for new runs (resumed runs re-enter
+		// the prior session file directly).
+		const sessionDir = sessionPath ? undefined : path.join(opened.paths.runsDir, "sessions");
+		if (sessionDir) {
+			try {
+				fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+			} catch {
+				// session capture is best-effort; the run still proceeds
+			}
+		}
+
+		return { opened, role, task, model, cfg, timeoutInfo, modelNote, resumeOf, sessionPath, sessionDir };
+	}
 
 	/** Queued-call introspection for status views. */
 	queuedRunCount(): number {
@@ -453,6 +547,32 @@ export class DelegateApplicationImpl implements DelegateApplication {
 
 	queueLimit(): number {
 		return this.liveConfig.queueLimit;
+	}
+
+	/** R9: live background slot limit. */
+	backgroundLimit(): number {
+		return this.liveConfig.maxBackgroundRuns;
+	}
+
+	/** R14: live stream of a background run spawned by this process. */
+	getBackgroundStream(runId: string): { update: RunStreamUpdate | null; events: readonly FeedEvent[] } | null {
+		const s = this.backgroundStreams.get(runId);
+		if (!s) return null;
+		return { update: s.latest, events: s.ring.all() };
+	}
+
+	/** R14: recent background runs (terminal, newest-first). */
+	backgroundRecentRuns(limit = 3): Array<{ runId: string; role: RoleName; description?: string; state: RunTerminalState; durationMs?: number }> {
+		return listRuns(this.ports.agentDir, 20)
+			.filter((r) => r.background && isTerminalRunState(r.state))
+			.slice(0, limit)
+			.map((r) => ({
+				runId: r.runId,
+				role: r.role,
+				...(r.description ? { description: r.description } : {}),
+				state: r.state as RunTerminalState,
+				...(r.durationMs !== undefined ? { durationMs: r.durationMs } : {}),
+			}));
 	}
 
 	/** Pop the next queued run (if any) into the free slot, fire-and-forget. */

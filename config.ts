@@ -27,6 +27,8 @@ export interface DelegateConfigV1 {
 	maxRuns: number;
 	maxRunAgeDays: number;
 	updateThrottleMs: number;
+	/** R9: concurrent background children (default 3, clamp 1–8). */
+	maxBackgroundRuns: number;
 }
 
 export const DEFAULT_DELEGATE_CONFIG: DelegateConfigV1 = {
@@ -44,6 +46,7 @@ export const DEFAULT_DELEGATE_CONFIG: DelegateConfigV1 = {
 	maxRuns: 50,
 	maxRunAgeDays: 30,
 	updateThrottleMs: 100,
+	maxBackgroundRuns: 3,
 };
 
 const MIN_VALUES: Partial<Record<keyof DelegateConfigV1, number>> = {
@@ -59,6 +62,7 @@ const MIN_VALUES: Partial<Record<keyof DelegateConfigV1, number>> = {
 	maxRuns: 1,
 	maxRunAgeDays: 1,
 	updateThrottleMs: 0,
+	maxBackgroundRuns: 1,
 };
 
 const MAX_VALUES: Partial<Record<keyof DelegateConfigV1, number>> = {
@@ -74,6 +78,7 @@ const MAX_VALUES: Partial<Record<keyof DelegateConfigV1, number>> = {
 	maxRuns: 10_000,
 	maxRunAgeDays: 3650,
 	updateThrottleMs: 5_000,
+	maxBackgroundRuns: 8,
 };
 
 /**
