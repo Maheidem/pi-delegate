@@ -1101,6 +1101,41 @@ async function main() {
 		}
 	}
 
+	// ── Scenario S: R20 — /delegate bg slash launch (no model turn) ────
+	{
+		if (runScenario("S")) {
+		const dir = makeWorkspace();
+		const sessionFile = path.join(dir, "e2e-session.jsonl");
+		const pi = startPi(dir, { session: sessionFile });
+		// A slash command: the extension spawns the background run directly;
+		// the parent needs no model turn for the launch itself.
+		await pi.prompt("/delegate bg Create the file s-marker.txt containing the word SLASHED, verify it, and finish.", 60_000);
+		const created = await waitFor(
+				() => bgLedger(readSessionEntries(sessionFile)).find((e) => e.data?.type === "created"),
+			120_000,
+			"created entry",
+		);
+		ok(!!created, "S: created ledger entry persisted");
+		const description = created?.data?.description;
+		ok(
+			typeof description === "string" && /^\S+( \S+){2,5}$/.test(description),
+			`S: derived description is 3–6 words (got ${JSON.stringify(description)})`,
+		);
+		const runId = created?.data?.runId;
+		if (runId) {
+			const done = await waitFor(
+					() => bgResults(readSessionEntries(sessionFile)).find((m) => m.details?.runId === runId),
+				420_000,
+				"terminal",
+			);
+			ok(!!done, "S: terminal report delivered");
+			ok(done?.details?.state === "succeeded", `S: slash-launched run succeeded (got ${done?.details?.state})`);
+			ok(fs.readFileSync(path.join(dir, "s-marker.txt"), "utf8").includes("SLASHED"), "S: child wrote s-marker.txt");
+		}
+		await stop(pi);
+		}
+	}
+
 	console.log(`\nE2E checks: ${checks - fails.length}/${checks}`);
 	if (fails.length) {
 		for (const f of fails) console.error(`FAILED: ${f}`);

@@ -19,6 +19,7 @@ export type DelegateIntent =
 	| { kind: "help" }
 	| { kind: "cancel"; runId?: string }
 	| { kind: "answer"; runId: string; text: string }
+	| { kind: "bg"; role: RoleName; task: string; timeoutMs?: number }
 	| { kind: "inspect"; runId?: string }
 	| { kind: "resume"; runId?: string; task: string; timeoutMs?: number }
 	| { kind: "peek"; runId?: string }
@@ -53,6 +54,7 @@ export const RESERVED_FIRST_TOKENS = new Set([
 	"help",
 	"cancel",
 	"answer",
+	"bg",
 	"inspect",
 	"resume",
 	"peek",
@@ -121,6 +123,21 @@ export function parseDelegateCommand(input: string, options: ParseOptions = {}):
 			if (!runId || !body) return invalid("resume");
 			return { kind: "resume", runId, task: body, timeoutMs };
 		}
+		case "bg": {
+			// R20: user-facing background launch — /delegate bg [general|research] <task>
+			const rest = trimmed.slice("bg".length).trim();
+			if (!rest) return invalid("bg");
+			const { task, timeoutMs } = extractFlags(rest);
+			if (!task) return invalid("bg");
+			const parts = task.split(/\s+/);
+			const roleToken = parts[0]!;
+			if (roleToken === "general" || roleToken === "research") {
+				const body = parts.slice(1).join(" ").trim();
+				if (!body) return invalid("bg");
+				return { kind: "bg", role: roleToken, task: body, timeoutMs };
+			}
+			return { kind: "bg", role: "general", task, timeoutMs };
+		}
 		case "run": {
 			const rest = trimmed.slice("run".length).trim();
 			if (!rest) return invalid("run");
@@ -154,7 +171,7 @@ function invalid(token: string): DelegateIntent {
 export function delegateCompletions(prefix: string, recentRunIds: string[] = []): string[] {
 	const words = (prefix ?? "").trimStart();
 	const tokens = words.split(/\s+/);
-	const base: string[] = ["on", "off", "status", "paths", "doctor", "help", "cancel ", "answer ", "inspect ", "resume ", "peek ", "run ", "research "];
+	const base: string[] = ["on", "off", "status", "paths", "doctor", "help", "cancel ", "answer ", "bg ", "inspect ", "resume ", "peek ", "run ", "research "];
 
 	const matches: string[] = [];
 	if (tokens.length <= 1) {

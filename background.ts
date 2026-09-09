@@ -35,6 +35,22 @@ export const BACKGROUND_LEDGER_TYPE = "delegate.background";
 /** R10: terminal-result custom-message type. */
 export const BACKGROUND_RESULT_TYPE = "delegate-background-result";
 
+/**
+ * R20: derive a valid 3–6-word description from the task's first line when
+ * the user launches via `/delegate bg` (which takes no description). Takes
+ * the first line, strips edge punctuation, and uses its first words.
+ */
+export function deriveBackgroundDescription(task: string): { ok: true; value: string } | { ok: false; error: string } {
+	const firstLine = task.split("\n")[0]?.trim() ?? "";
+	const cleaned = firstLine.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").trim();
+	const words = cleaned.split(/\s+/).filter(Boolean).map((w) => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "")).filter(Boolean);
+	if (words.length < 3) {
+		return { ok: false, error: "could not derive a 3–6-word description from the task's first line; give a longer task or use the delegate tool with an explicit description." };
+	}
+	const value = words.slice(0, 6).join(" ");
+	return validateBackgroundDescription(value);
+}
+
 /** R12: was a terminal result for this run already delivered on the branch? */
 export function wasResultDelivered(branch: readonly SessionEntryLike[], runId: string): boolean {
 	return branch.some((entry) => {

@@ -4,7 +4,7 @@ Status: APPROVED — user sign-off 2026-09-09 (canonical workflow step 3 complet
 Implementation entry point: `GOAL-PROMPT.md` (same directory) in a fresh `/goal` session.
 Baseline: 0.3.2 @ `custom-extensions/delegate/` (npm `@maheidem/pi-delegate`; check the
 agent-global store copy for what Pi actually runs).
-Extends: `PI-DELEGATE-TS-001` (R1–R7 already shipped). This spec adds **R8–R19**.
+Extends: `PI-DELEGATE-TS-001` (R1–R7 already shipped). This spec adds **R8–R20**.
 Prior art studied at source level: [elpapi42/pi-async-fork](https://github.com/elpapi42/pi-async-fork)
 (master, 40 commits; clone in `/tmp/pi-async-fork` during research) — see §1 and §14.
 
@@ -316,6 +316,29 @@ the user can always answer instead of (or before) the model: `/delegate answer
 This is the escalation path when the model's answer is wrong or the user wants
 control — the mechanism is identical to R17, only the entry point differs.
 
+**R20 — User-facing background launch.** `/delegate bg [general|research] <task>`
+(the role prefix is optional and defaults to `general`) launches a background
+run from the user surface. The command MUST use the same validation/spawn/
+register path as the model tool's `background: true` request — role preflight,
+request validation, `E_BACKGROUND_FULL` slot accounting (R9), `runBackground`,
+and manager registration — it is an entry point, never a second implementation.
+The user supplies no `description`, so one is DERIVED from the task's first
+line: control characters act as separators, edge punctuation (leading/trailing
+non-alphanumerics) is stripped from each word, and the first 3–6 words joined
+by single spaces become the description. The derived value MUST pass the exact
+R8 `description` validation before any side effect, MUST be echoed in the
+started output (`[delegate background started · runId · role · description]`
+plus the do-not-wait usage line), and MUST be stored on the receipt and the
+`created` ledger entry exactly like an explicit description. A first line too
+short to yield 3 words after cleaning MUST fail with an instructive error
+(longer task, or an explicit `description` via the `delegate` tool) — the
+command never launches with a degenerate description. Slot limits (R9) and all
+delivery/ledger/reconcile semantics (R10–R13) apply unchanged. The dashboard
+offers the equivalent **Run background task…** editor action feeding the same
+path (panel ≡ command ≡ headless parity), and a background launch NEVER blocks
+the invoking turn — the command resolves as soon as the child is spawned and
+registered, exactly as the tool call does.
+
 ---
 
 ## 5. Exact message envelopes (normative text)
@@ -489,6 +512,7 @@ details, `delegate.background` entries).
 | M3 | R16 steering | — |
 | M4 | R17–R18 ask/note channels + strict-mode set update | **0.6.0** |
 | M5 | R19 user intercept + dashboard Answer… + polish | (0.6.x) |
+| M6 | R20 user-facing background launch (`/delegate bg` + dashboard action, derived description) — post-goal amendment, user request | **0.6.2** |
 
 Every milestone leaves `npm test` green (unit + e2e). Publish flow per AGENTS.md
 (tests → `npm version` → commit/push → `npm publish` → `pi install npm:@maheidem/pi-delegate`

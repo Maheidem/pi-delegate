@@ -49,6 +49,7 @@ import {
 	BackgroundManager,
 	BACKGROUND_RESULT_TYPE,
 	backgroundResultDisplay,
+	deriveBackgroundDescription,
 	formatBackgroundDetailText,
 	formatBackgroundInventoryText,
 	formatBackgroundStartedText,
@@ -992,6 +993,36 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		sendHandoffMessage(r);
 	};
 
+	// R20: user-facing background launch — /delegate bg and the dashboard
+	// action spawn a background run (description derived from the task's
+	// first line) and return immediately; the report arrives later.
+	const runCommandBackground = async (task: string, role: "general" | "research", ctx: ExtensionCommandContext, timeoutMs?: number): Promise<void> => {
+		const desc = deriveBackgroundDescription(task);
+		if (!desc.ok) {
+			say(ctx, `[delegate] ${desc.error}`, "error");
+			return;
+		}
+		const slot = background.slotError();
+		if (slot) {
+			say(ctx, `[delegate] ${slot.code}: ${slot.message}`, "warning");
+			return;
+		}
+		const request = buildRequest(task, role, "command", ctx, timeoutMs, {
+			background: true,
+			description: desc.value,
+		});
+		refreshDoctor(ctx);
+		const attempt = app.runBackground(request, {
+			onAsk: (ask) => background.onAsk(ask),
+		});
+		if ("error" in attempt) {
+			say(ctx, formatRunText(attempt.error), "error");
+			return;
+		}
+		background.register(attempt.handle);
+		say(ctx, formatBackgroundStartedText(attempt.handle.runId, attempt.handle.role, attempt.handle.description));
+	};
+
 	const statusText = (ctx: ExtensionContext): string => {
 		const s = app.getStatus(pi.getActiveTools(), ctx.cwd ?? process.cwd());
 		const lines = ["[delegate]", `version: v${delegateVersion()} (loaded at session start; /reload picks up newer installs)`, `mode: ${s.modeEnabled ? "strict" : "normal"}`];
@@ -1034,6 +1065,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			"/delegate status                   stable status text",
 			"/delegate run general <task>       run a delegation with a role",
 			"/delegate research <task>         research role",
+			"/delegate bg [role] <task>        run it in the background (report arrives later)",
 			"/delegate <task>                   general-role shorthand",
 			"/delegate cancel [run-id]        cancel the active run",
 			"/delegate answer <run-id> <text>   answer a blocked background child's question",
@@ -1151,6 +1183,9 @@ export default function delegateExtension(pi: ExtensionAPI) {
 						return;
 					}
 					await runCommandForeground(intent.task, intent.role, ctx, intent.timeoutMs);
+					return;
+				case "bg":
+					await runCommandBackground(intent.task, isRoleName(intent.role) ? intent.role : "general", ctx, intent.timeoutMs);
 					return;
 				case "peek": {
 					const id = intent.runId?.trim() || app.mostRecentRunId();
@@ -1367,6 +1402,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			rows: [
 				{ key: "run-general", label: "Run general task…", value: "", kind: "action" },
 				{ key: "run-research", label: "Run research task…", value: "", kind: "action" },
+				{ key: "run-background", label: "Run background task…", value: "", kind: "action" },
 				{ key: "peek", label: "Peek live / final detail", value: "", kind: "action", disabled: !active && !last },
 				{ key: "cancel", label: "Cancel active run", value: "", kind: "action", disabled: !active },
 				{ key: "resume", label: "Resume last run…", value: "", kind: "action", disabled: !last },
@@ -1456,6 +1492,13 @@ export default function delegateExtension(pi: ExtensionAPI) {
 				const task = await ctx.ui.editor(`Delegated task (${role})`, "");
 				if (!task || !task.trim()) continue;
 				await runCommandForeground(task, role, ctx);
+				continue;
+			}
+			// R20: user-facing background launch — spawn, return immediately.
+			if (action === "run-background") {
+				const task = await ctx.ui.editor("Background task (returns immediately)", "");
+				if (!task || !task.trim()) continue;
+				await runCommandBackground(task.trim(), "general", ctx);
 				continue;
 			}
 			if (action === "peek") {

@@ -28,6 +28,7 @@ is performed by this package.
 /delegate                          dashboard (TUI) / status (headless)
 /delegate run general <task>      foreground delegation (impl specialist)
 /delegate research <task>         foreground web research (read-only tools)
+/delegate bg [role] <task>        run it in the background (report arrives later)
 /delegate on                      enable strict coordinator mode (session,
                                     tree-stable; active tool set becomes
                                     ['delegate'])
@@ -182,6 +183,16 @@ internal work events.
 - Headless note: background works, but a `pi -p` process exit kills in-flight
   children — receipts finalize interrupted/resumable. Prefer foreground for
   one-shot headless flows.
+
+**User-facing launch (v0.6.2, R20).** `/delegate bg [general|research] <task>`
+runs the same background run from the command line with no description to
+write: one is derived from the task's first line (edge punctuation stripped,
+first 3–6 words), validated by the same 3–6-word rule — a first line too
+short to yield 3 words is an instructive error — echoed in the started line,
+and stored on the receipt/ledger like an explicit one. The dashboard's
+**Run background task…** action (task editor) takes the same path. Explicit
+descriptions remain available to the model via `delegate({ background: true,
+description: "…" })`; foreground `/delegate run` is unchanged.
 
 ### Bidirectional channels (v0.6.0, R16–R19)
 

@@ -16,6 +16,7 @@ import {
 	BACKGROUND_LEDGER_TYPE,
 	BACKGROUND_RESULT_TYPE,
 	backgroundResultDisplay,
+	deriveBackgroundDescription,
 	formatBackgroundDetailText,
 	formatBackgroundInventoryText,
 	formatBackgroundResultEnvelope,
@@ -161,6 +162,21 @@ test("R8: background description accepts 3–6 words, trims, rejects controls", 
 	assert.equal(validateBackgroundDescription("line\u2028break").ok, false);
 	assert.equal(validateBackgroundDescription("null\u0000byte").ok, false);
 	assert.equal(validateBackgroundDescription(42).ok, false);
+});
+
+test("R20: deriveBackgroundDescription builds a 3–6-word description from the task's first line", () => {
+	assert.deepEqual(deriveBackgroundDescription("Write the report now please"), { ok: true, value: "Write the report now please" });
+	// A long first line yields only its first 6 words.
+	assert.deepEqual(
+		deriveBackgroundDescription("one two three four five six seven eight nine ten"),
+		{ ok: true, value: "one two three four five six" },
+	);
+	// Too few words to derive from.
+	assert.equal(deriveBackgroundDescription("two words").ok, false);
+	// Edge punctuation is stripped per word.
+	assert.deepEqual(deriveBackgroundDescription("Fix: the, broken! test?"), { ok: true, value: "Fix the broken test" });
+	// Control characters are replaced, not rejected.
+	assert.deepEqual(deriveBackgroundDescription("Fix\u0000 the broken thing now"), { ok: true, value: "Fix the broken thing now" });
 });
 
 // ── R10: envelope text (byte-exact, SPEC §5) ─────────────────────────────
