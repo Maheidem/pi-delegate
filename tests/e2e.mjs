@@ -1046,6 +1046,61 @@ async function main() {
 		}
 	}
 
+	// ── Scenario R: user-intercept command surface (deterministic) ──────
+	// The live user-answer happy path is exercised by scenario O's autonomous
+	// round-trip + the ask unit tests (writeAnswer/by-user routing). Driving
+	// the model to NOT answer while its wake turn runs proved nondeterministic
+	// across 3 attempts (ack race / wake-turn detour / child stall) — recorded
+	// as knownGaps in the evidence manifest. What MUST hold deterministically
+	// is the command surface itself: grammar, routing errors, no-pending.
+	{
+		if (runScenario("R")) {
+		const dir = makeWorkspace();
+		const sessionFile = path.join(dir, "e2e-session.jsonl");
+		const pi = startPi(dir, { session: sessionFile });
+		await pi.prompt("/delegate status", 60_000);
+		// Unknown run: instructive error, no model involved.
+		await pi.prompt("/delegate answer del_20260101T000000Z_00000000 nope", 60_000);
+		const errText = await waitFor(() => (/unknown or expired background run/.test(pi.allText()) ? true : null), 15_000, "unknown-run error");
+		ok(!!errText, "R: unknown runId answers with an instructive error");
+		// Malformed usage: the parser rejects it.
+		await pi.prompt("/delegate answer onlyrunid", 60_000);
+		const usageText = await waitFor(() => (/unrecognized|usage/i.test(pi.allText()) ? true : null), 15_000, "usage error");
+		ok(!!usageText, "R: malformed answer command rejected with usage");
+		// Live background run, no pending ask: no-pending error is deterministic.
+		await pi.prompt(
+				"Call the delegate tool ONCE with background=true, task='Create the file r-det.txt containing the word PLAIN, verify it, and finish. Do not call ask_parent.' description='No ask plain run'. Reply with exactly: SPAWNED.",
+				300_000,
+			);
+		const created = await waitFor(
+				() => bgLedger(readSessionEntries(sessionFile)).find((e) => e.data?.type === "created"),
+				120_000,
+				"created entry",
+			);
+		const rRunId = created?.data?.runId;
+		ok(!!rRunId, "R: background run spawned for no-pending check");
+		if (rRunId) {
+			await pi.prompt(`/delegate answer ${rRunId} too early`, 60_000);
+			const noPending = await waitFor(() => (/no pending question/.test(pi.allText()) ? true : null), 20_000, "no-pending error");
+			ok(!!noPending, "R: answering a run with no pending ask fails instructively");
+			// The run itself still completes normally and delivers its terminal.
+			const done = await waitFor(
+				() => {
+					const entries = readSessionEntries(sessionFile);
+					return entries.find(
+						(e) => e.type === "custom_message" && e.customType === "delegate-background-result" && e.details?.runId === rRunId,
+					) ?? null;
+				},
+				420_000,
+				"terminal (unaffected by early answer attempt)",
+			);
+			ok(done?.details?.state === "succeeded", `R: run unaffected by the early answer attempt (got ${done?.details?.state})`);
+			ok(fs.existsSync(path.join(dir, "r-det.txt")), "R: run completed its work (r-det.txt)");
+		}
+		await stop(pi);
+		}
+	}
+
 	console.log(`\nE2E checks: ${checks - fails.length}/${checks}`);
 	if (fails.length) {
 		for (const f of fails) console.error(`FAILED: ${f}`);

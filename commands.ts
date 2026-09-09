@@ -18,6 +18,7 @@ export type DelegateIntent =
 	| { kind: "doctor" }
 	| { kind: "help" }
 	| { kind: "cancel"; runId?: string }
+	| { kind: "answer"; runId: string; text: string }
 	| { kind: "inspect"; runId?: string }
 	| { kind: "resume"; runId?: string; task: string; timeoutMs?: number }
 	| { kind: "peek"; runId?: string }
@@ -51,6 +52,7 @@ export const RESERVED_FIRST_TOKENS = new Set([
 	"doctor",
 	"help",
 	"cancel",
+	"answer",
 	"inspect",
 	"resume",
 	"peek",
@@ -92,6 +94,15 @@ export function parseDelegateCommand(input: string, options: ParseOptions = {}):
 		case "cancel": {
 			const rest = trimmed.slice("cancel".length).trim();
 			return { kind: "cancel", runId: rest || undefined };
+		}
+		case "answer": {
+			// R19: /delegate answer <run-id> <answer text...>
+			const rest = trimmed.slice("answer".length).trim();
+			const space = rest.indexOf(" ");
+			if (space <= 0 || !rest.slice(space + 1).trim()) {
+				return { kind: "invalid", token: "answer", usage: "/delegate answer <run-id> <answer text…>" };
+			}
+			return { kind: "answer", runId: rest.slice(0, space), text: rest.slice(space + 1).trim() };
 		}
 		case "inspect": {
 			const rest = trimmed.slice("inspect".length).trim();
@@ -143,7 +154,7 @@ function invalid(token: string): DelegateIntent {
 export function delegateCompletions(prefix: string, recentRunIds: string[] = []): string[] {
 	const words = (prefix ?? "").trimStart();
 	const tokens = words.split(/\s+/);
-	const base: string[] = ["on", "off", "status", "paths", "doctor", "help", "cancel ", "inspect ", "resume ", "peek ", "run ", "research "];
+	const base: string[] = ["on", "off", "status", "paths", "doctor", "help", "cancel ", "answer ", "inspect ", "resume ", "peek ", "run ", "research "];
 
 	const matches: string[] = [];
 	if (tokens.length <= 1) {

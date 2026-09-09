@@ -1036,6 +1036,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			"/delegate research <task>         research role",
 			"/delegate <task>                   general-role shorthand",
 			"/delegate cancel [run-id]        cancel the active run",
+			"/delegate answer <run-id> <text>   answer a blocked background child's question",
 			"/delegate resume <run-id> <task> resume a prior run's child session",
 			"/delegate inspect [run-id]       inspect a run (default: recent/active)",
 			"/delegate paths                    config + run store paths",
@@ -1129,6 +1130,16 @@ export default function delegateExtension(pi: ExtensionAPI) {
 						return;
 					}
 					say(ctx, `[delegate] ${res.message}`, "warning");
+					return;
+				}
+				case "answer": {
+					// R19: user intercept — answer a blocked child directly.
+					const result = background.answer(intent.runId, intent.text, "user");
+					if (result.ok) {
+						say(ctx, `[delegate] Answer delivered to background run ${intent.runId}; the child is resuming.`);
+					} else {
+						say(ctx, `[delegate] ${result.error}`, "warning");
+					}
 					return;
 				}
 				case "inspect":
@@ -1342,6 +1353,10 @@ export default function delegateExtension(pi: ExtensionAPI) {
 					const g = stateGlyph(r.state as never);
 					rows.push({ key: `bg-last-${r.runId}`, label: `${g.glyph} last`, value: `${r.role} ${g.word}${r.durationMs != null ? ` · ${Math.round(r.durationMs / 1000)}s` : ""} · ${r.runId.slice(-12)}`, kind: "info", valueStyle: "muted" });
 				}
+				// R19: pending child questions are answerable from the panel.
+				for (const q of background.pendingQuestions()) {
+					rows.push({ key: `bg-answer-${q.runId}`, label: `? Answer ${q.runId.slice(-12)}`, value: `child blocked (${q.topic})`, kind: "action" });
+				}
 				rows.push({ key: "bg-slots", label: "Slots", value: `${bgLive.length}/${app.backgroundLimit()} active`, kind: "info", valueStyle: "muted" });
 				sections.push({ title: "Background runs", rows });
 			}
@@ -1445,6 +1460,16 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			}
 			if (action === "peek") {
 				await openPeek(ctx);
+				continue;
+			}
+			// R19: answer a pending child question from the panel.
+			if (action.startsWith("bg-answer-")) {
+				const qRunId = action.slice("bg-answer-".length);
+				const answer = await ctx.ui.editor(`Answer child ${qRunId.slice(-12)}`, "");
+				if (answer && answer.trim()) {
+					const result = background.answer(qRunId, answer.trim(), "user");
+					say(ctx, result.ok ? `[delegate] Answer delivered to background run ${qRunId}.` : `[delegate] ${result.error}`, result.ok ? "info" : "warning");
+				}
 				continue;
 			}
 			if (action === "cancel") {
