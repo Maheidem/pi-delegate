@@ -461,6 +461,28 @@ test("R8: runBackground returns validation errors without spawning", () => {
 
 // ── R14/R15: status builders + display cleaning ─────────────────────
 
+test("R16: send steers live runs, rejects done/unknown", async () => {
+	const { ports } = makePorts();
+	const manager = new BackgroundManager(ports);
+	const sent: string[] = [];
+	const a = deferredHandle("del_a");
+	a.handle.steer = (message: string) => {
+		sent.push(message);
+		return { ok: true };
+	};
+	manager.register(a.handle);
+	assert.deepEqual(manager.send("del_a", "prefer option two"), { ok: true });
+	assert.deepEqual(sent, ["prefer option two"]);
+	const unknown = manager.send("del_missing", "x");
+	assert.equal(unknown.ok, false);
+	if (!unknown.ok) assert.match(unknown.error, /unknown or expired background run/);
+	a.resolve(successResult("del_a"));
+	await flush();
+	const done = manager.send("del_a", "x");
+	assert.equal(done.ok, false);
+	if (!done.ok) assert.match(done.error, /already finished/);
+});
+
 test("R14: inventory text lists slots, live runs, and recent terminals", () => {
 	const text = formatBackgroundInventoryText({
 		limit: 3,

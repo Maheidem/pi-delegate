@@ -279,6 +279,8 @@ export class DelegateRunner {
 	private readonly listeners: Array<{ remove: () => void }> = [];
 	private transcriptSeq = 0;
 	private readonly promptId: string;
+	/** R16: steering sequence (follow_up record ids). */
+	private steerSeq = 0;
 
 	constructor(opened: OpenedRun, req: RunnerSpawnRequest, cfg: RunnerConfig, hooks: RunHooks = {}, resolveInvocation?: PiInvocationResolver) {
 		this.opened = opened;
@@ -650,6 +652,32 @@ export class DelegateRunner {
 	 * A user/parent `cancelled` keeps the OLD fast path (2 s → SIGTERM):
 	 * the caller asked to stop, not to negotiate.
 	 */
+	/**
+	 * R16: write ONE steering message to the live child as an RPC
+	 * `follow_up` record (pi steering semantics: queued before the next
+	 * model call, never interrupts). Only valid while the run is live;
+	 * terminal runs point at resumeFrom. Steering re-arms the idle
+	 * watchdog (a steer that lands between turns must not read as a stall).
+	 */
+	steer(message: string): { ok: true } | { ok: false; error: string } {
+		if (this.finalizing || this.cancelRequested || this.settled) {
+			return { ok: false, error: `run ${this.runId} is no longer live (finished or finishing); continue it with delegate({ resumeFrom: "${this.runId}", … }) instead.` };
+		}
+		const child = this.child;
+		if (!child || child.killed || child.exitCode !== null) {
+			return { ok: false, error: `run ${this.runId} has no live child process.` };
+		}
+		try {
+			this.steerSeq += 1;
+			const record = JSON.stringify({ id: `delegate:${this.runId}:steer:${this.steerSeq}`, type: "follow_up", message });
+			child.stdin?.write(`${record}\n`);
+			this.noteActivity();
+			return { ok: true };
+		} catch (error) {
+			return { ok: false, error: `could not write steering message: ${(error as Error).message}` };
+		}
+	}
+
 	cancel(state: RunTerminalState): void {
 		if (this.finalizing) return;
 		// §9.7 — the FIRST cancellation wins; later cancels are no-ops.

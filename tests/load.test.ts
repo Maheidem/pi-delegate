@@ -61,8 +61,8 @@ test("load: registers exactly /delegate + delegate tool (no aliases)", async () 
 	const pi = mockPi();
 	(factory as (pi: unknown) => void)(pi);
 	assert.deepEqual(pi.commands, ["delegate"]);
-	// R14 (async spec): delegate_status joins the registration inventory.
-	assert.deepEqual(pi.tools, ["delegate", "delegate_status"]);
+	// R14/R16 (async spec): delegate_status + delegate_send join the registration inventory.
+	assert.deepEqual(pi.tools, ["delegate", "delegate_status", "delegate_send"]);
 	// R15 (async spec): delegate-background-result joins the renderers.
 	assert.deepEqual(pi.messageRenderers, ["delegate-handoff", "delegate-background-result"]);
 	for (const ev of ["tool_call", "session_start", "session_tree", "before_agent_start", "turn_start", "session_shutdown"]) {

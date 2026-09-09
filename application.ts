@@ -412,6 +412,7 @@ export class DelegateApplicationImpl implements DelegateApplication {
 				role: role.name,
 				description: request.description ?? "",
 				cancel: (reason?: string) => runner.cancel((reason ?? "cancelled") as "cancelled"),
+				steer: (message: string) => runner.steer(message),
 				completion,
 			},
 		};

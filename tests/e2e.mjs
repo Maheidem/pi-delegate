@@ -833,6 +833,50 @@ async function main() {
 		}
 	}
 
+	// ── Scenario N: background steering — delegate_send lands mid-flight ─
+	{
+		if (runScenario("N")) {
+		const dir = makeWorkspace();
+		const sessionFile = path.join(dir, "e2e-session.jsonl");
+		const pi = startPi(dir, { session: sessionFile });
+		await pi.prompt(
+				"Call the delegate tool ONCE with background=true, task='First run this exact shell command and wait for it to complete: sleep 45. After the sleep, create a file named bg-sleep.txt containing the word READY, verify it exists, and finish.' description='Steerable slow write test'. The call returns immediately; reply with exactly: SPAWNED.",
+				300_000,
+			);
+		const created = await waitFor(
+				() => bgLedger(readSessionEntries(sessionFile)).find((e) => e.data?.type === "created"),
+			120_000,
+				"created entry",
+			);
+		ok(!!created, "N: background run created");
+		const runId = created?.data?.runId;
+		ok(!!runId, "N: runId captured");
+		if (runId) {
+			// Steer while the child sleeps — the follow_up lands before its
+			// next model call.
+			await pi.prompt(
+					`Call the delegate_send tool now with runId="${runId}" and message="ADDITIONAL INSTRUCTION: after completing the original task, ALSO create a file named steered.txt containing exactly the word STEERED, then verify both files exist." Reply with exactly: STEERED-SENT.`,
+					180_000,
+			);
+			ok(/Steering accepted/.test(pi.allText()), "N: delegate_send accepted");
+			// Wait for the terminal report, then prove the child absorbed the steer.
+			const done = await waitFor(
+					() => {
+					const msgs = bgResults(readSessionEntries(sessionFile)).filter((m) => m.details?.runId === runId);
+					return msgs.length >= 1 ? msgs[0] : null;
+				},
+				420_000,
+					"terminal after steer",
+			);
+			ok(!!done, "N: terminal report delivered");
+			ok(done?.details?.state === "succeeded", `N: steered run succeeded (got ${done?.details?.state})`);
+			ok(fs.readFileSync(path.join(dir, "bg-sleep.txt"), "utf8").includes("READY"), "N: original task completed");
+			ok(fs.readFileSync(path.join(dir, "steered.txt"), "utf8").includes("STEERED"), "N: steering applied by the child (steered.txt)");
+		}
+		await stop(pi);
+		}
+	}
+
 	console.log(`\nE2E checks: ${checks - fails.length}/${checks}`);
 	if (fails.length) {
 		for (const f of fails) console.error(`FAILED: ${f}`);

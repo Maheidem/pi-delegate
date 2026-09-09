@@ -443,6 +443,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			"Use background=true (with a 3–6-word description) for long builds, test matrices, or research that should not block this turn: the call returns a runId immediately and the terminal report arrives later as a message. Check progress with delegate_status; do not wait inline.",
 			"Treat background terminal reports as internal work events: acknowledge them to the user with at most one line; do not re-narrate the handoff unless material.",
 			"On E_BACKGROUND_FULL, do not re-issue the task: check delegate_status and wait for terminal reports to free slots.",
+			"Steer live background runs with delegate_send (course corrections apply at the child's next model call); reserve resumeFrom for finished runs.",
 			"A timed-out run leaves a partialHandoff, a git checkpoint and a resumable child session: pass resumeFrom: <runId> to continue in the same context instead of re-explaining, and inspect the receipt's gitDelta before repairing anything.",
 			"Pin model: 'provider/model-id' when the child must not silently follow the parent's current model (e.g. after a mid-session model fallback).",
 			"For long validation/benchmark subtasks set timeout to at least 2x the longest expected single tool call.",
@@ -690,6 +691,58 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			const text = (result.content ?? []).map((c: { text?: string }) => c.text ?? "").filter(Boolean).join("\n");
 			const first = text.split("\n").slice(0, 6).join("\n");
 			return renderToolPlainCard(first || text);
+		},
+	});
+
+	// ── R16: delegate_send tool (parent → child steering) ──────────────────
+
+	pi.registerTool({
+		name: "delegate_send",
+		label: "Steer background run",
+		description:
+			"Send a steering message to a LIVE background delegate run. The message is queued before the child's next model call (pi steering semantics — it never interrupts in-flight work). " +
+			"Use it for course corrections and additional instructions on a running background task. " +
+			"Foreground runs cannot be steered; finished runs must be continued with delegate({ resumeFrom: … }).",
+		promptSnippet: "Steer a live background delegate run",
+		promptGuidelines: [
+			"Prefer delegate_send for course corrections on live background runs; use resumeFrom only after a run finished.",
+		],
+		parameters: Type.Object({
+			runId: Type.String({ description: "The runId returned by the background delegate call." }),
+			message: Type.String({ minLength: 1, description: "The instruction for the child. Be specific and self-contained — it is applied to the child's ongoing task context." }),
+		}),
+		async execute(_toolCallId, params) {
+			const runId = typeof params.runId === "string" ? params.runId.trim() : "";
+			const message = typeof params.message === "string" ? params.message : "";
+			if (!runId || !message) {
+				return {
+					content: [{ type: "text" as const, text: "delegate_send requires runId and message." }],
+					details: {} as Record<string, unknown>,
+					isError: true,
+				};
+			}
+			const result = background.send(runId, message);
+			if (!result.ok) {
+				return {
+					content: [{ type: "text" as const, text: `E_STEER_FAILED: ${result.error}` }],
+					details: { runId } as Record<string, unknown>,
+					isError: true,
+				};
+			}
+			return {
+				content: [{ type: "text" as const, text: `Steering accepted for background run ${runId}. The child applies it at its next model call; watch for the terminal report or check delegate_status.` }],
+				details: { runId, steered: true } as Record<string, unknown>,
+			};
+		},
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		renderCall(args: any, theme: any) {
+			const runId = typeof args.runId === "string" ? args.runId.slice(-12) : "?";
+			return renderToolCallCard(theme, { title: "delegate_send", subject: "steer", qualifier: runId });
+		},
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		renderResult(result: any, theme: any) {
+			const text = (result.content ?? []).map((c: { text?: string }) => c.text ?? "").filter(Boolean).join("\n");
+			return renderToolPlainCard(text.split("\n")[0] ?? text);
 		},
 	});
 

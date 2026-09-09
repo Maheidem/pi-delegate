@@ -324,6 +324,8 @@ export interface BackgroundRunHandle {
 	description: string;
 	/** Cancels the child (R13 shutdown / user cancel). */
 	cancel: (reason?: string) => void;
+	/** R16: steering to the live child (background runs only). */
+	steer?: (message: string) => { ok: true } | { ok: false; error: string };
 	/** Resolves with the terminal DelegateRunResult (never rejects). */
 	completion: Promise<DelegateRunResult>;
 }

@@ -507,6 +507,24 @@ export class BackgroundManager {
 		run.handle.cancel("cancelled");
 		return true;
 	}
+
+	/** R16: steer one live background run (RPC follow_up). */
+	send(runId: string, message: string): { ok: true } | { ok: false; error: string } {
+		const run = this.#runs.get(runId);
+		if (!run) {
+			return {
+				ok: false,
+				error: `unknown or expired background run ${runId}. It is not a live background run of this session (foreground runs cannot be steered — the parent turn is blocked on them; finished runs continue via delegate({ resumeFrom: … })).`,
+			};
+		}
+		if (run.done) {
+			return { ok: false, error: `background run ${runId} already finished; continue it with delegate({ resumeFrom: "${runId}", … }) instead.` };
+		}
+		if (!run.handle.steer) {
+			return { ok: false, error: `background run ${runId} does not support steering.` };
+		}
+		return run.handle.steer(message);
+	}
 }
 
 // ── R14: status text builders (pure; the adapter feeds data in) ────────
