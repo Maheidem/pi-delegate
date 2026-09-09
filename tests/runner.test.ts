@@ -507,6 +507,15 @@ test("R3: child args persist sessions (--session-dir) or re-enter (--session)", 
 	assert.ok(fresh.args.includes("--session-dir"));
 	const toolsArg = fresh.args[fresh.args.indexOf("--tools") + 1] ?? "";
 	assert.ok(toolsArg.split(",").includes("handoff"), `handoff tool is in the child ceiling (${toolsArg})`);
+	// R17 (async spec): ask_parent is FOREGROUND-FORBIDDEN — a foreground
+	// child asking deadlocks the parent turn on itself by construction.
+	assert.ok(!toolsArg.split(",").includes("ask_parent"), `no ask_parent in a foreground ceiling (${toolsArg})`);
+	assert.ok(!fresh.env.PI_DELEGATE_ASK_DIR, "no ask env in a foreground spawn");
+	const bg = buildChildArgs({ ...base, background: true, askDir: "/runs/answers/x", askTimeoutMs: 600_000, askMaxQuestions: 5 }, role);
+	const bgTools = bg.args[bg.args.indexOf("--tools") + 1] ?? "";
+	assert.ok(bgTools.split(",").includes("ask_parent"), `ask_parent in a background ceiling (${bgTools})`);
+	assert.equal(bg.env.PI_DELEGATE_ASK_DIR, "/runs/answers/x");
+	assert.equal(bg.env.PI_DELEGATE_BACKGROUND, "1");
 	assert.ok(!fresh.args.includes("--no-session"));
 	const resumed = buildChildArgs({ ...base, sessionPath: "/runs/x.session.jsonl" }, role);
 	assert.equal(resumed.args[resumed.args.indexOf("--session") + 1], "/runs/x.session.jsonl");
