@@ -7,6 +7,8 @@
 
 import { truncateToWidth, visibleWidth, matchesKey, type Component } from "@earendil-works/pi-tui";
 import type { Theme, KeybindingsManager, ThemeColor } from "@earendil-works/pi-coding-agent";
+import { frameHeight, padToFrame } from "./panel-frame.ts";
+import type { PanelSnapshot } from "./settings-panel.ts";
 
 export interface PeekViewState {
 	/** Header: run id + state/model. */
@@ -26,10 +28,23 @@ export interface PeekViewHost {
 	done(result: { closed?: boolean }): void;
 }
 
-/** Fixed overlay height — rows never change between frames (smear guard). */
-const PEEK_ROWS = 20;
-/** Content rows inside the fixed frame (top + summary + status + bottom = 4). */
-const CONTENT_ROWS = PEEK_ROWS - 4;
+/**
+ * Content rows inside the fixed frame — the canonical frame's detail
+ * window. Builder-side: newest at the bottom, blank-padded on top, ALWAYS
+ * exactly CONTENT_ROWS tall (panel-frame rule: the frame never grows).
+ */
+const CONTENT_ROWS = 16;
+
+/**
+ * Fixed overlay height, DERIVED from the canonical panel-frame grammar:
+ * top + content window + message (summary row) + navigation (status row) +
+ * bottom. Rows never change between frames (smear guard).
+ */
+const PEEK_ROWS = frameHeight({
+	title: "",
+	sections: [],
+	detailLines: Array.from({ length: CONTENT_ROWS }, () => ""),
+});
 
 export class PeekView implements Component {
 	private readonly host: PeekViewHost;
@@ -101,11 +116,25 @@ export class PeekView implements Component {
 			? `● live — following · j/k scroll · f re-follow · q close${counts ? ` · ${counts}` : ""}`
 			: `final — ${total} event(s) · j/k scroll · q close${counts ? ` · ${counts}` : ""}`;
 
+		// Frame arithmetic through the canonical helper: the window is the
+		// grammar's detail block; the summary row occupies the grammar's
+		// message slot and the status row its navigation slot (both rendered
+		// locally with the colours this overlay needs — the grammar counts them
+		// unconditionally, so they never appear in the snapshot). padToFrame is
+		// a no-op while the builder invariant holds (window exactly
+		// CONTENT_ROWS) and is the tripwire the moment any slot count drifts.
+		const snapshot: PanelSnapshot = {
+			title,
+			sections: [],
+			detailLines: content,
+		};
+		const windowRows = padToFrame(snapshot, PEEK_ROWS).detailLines ?? [];
+
 		const lines: string[] = [
 			top,
 			pad(truncateToWidth(s.summary, inner), "muted"),
 			pad(status, s.live ? "success" : "dim"),
-			...content.map((l) => pad(l, l ? "text" : undefined)),
+			...windowRows.map((l) => pad(l, l ? "text" : undefined)),
 			bottom,
 		];
 
