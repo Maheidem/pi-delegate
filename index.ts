@@ -572,7 +572,20 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		},
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		renderResult(result: any, options: any, theme: any) {
-			const d = result.details as DelegateDetails | undefined;
+			const d = result.details as (DelegateDetails & { background?: boolean; description?: string }) | undefined;
+			// Background spawn: start details {runId, role, background, description}
+			// carry no state/duration/usage — the full-card path below would render
+			// ✗ unknown NaNs ↑0 ↓0. Neutral spawned card instead; runId guard keeps
+			// the slot/busy error details {background, busy} on the plain path.
+			if (d?.runId && d.background === true) {
+				return renderToolResultCard(theme, {
+					header: `→ ${String(d.runId).slice(-16)}`,
+					lead: d.role,
+					state: "spawned",
+					stateBits: d.description ? [d.description] : [],
+					detailLines: [{ text: "  report arrives as a message · poll delegate_status" }],
+				});
+			}
 			if (!d?.runId) {
 				const text = (result.content ?? []).map((c: { text?: string }) => c.text ?? "").filter(Boolean).join("\n");
 				return renderToolPlainCard(text);

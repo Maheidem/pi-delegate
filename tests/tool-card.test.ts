@@ -95,6 +95,19 @@ test("tool card: failed — failed word + reason tail, informative not bare", as
 	assert.match(out, /E_PROVIDER_ERROR/, "reason preserved");
 });
 
+test("tool card: background spawn — spawned word + description, never ✗/unknown/NaN", async () => {
+	const { renderResult } = await loadTool();
+	const out = flat(renderResult({ details: { runId: "run-abcdef0123456789", role: "general", background: true, description: "audit the config loader" }, content: [] }, {}, theme));
+	assert.match(out, /→ abcdef0123456789/);
+	assert.match(out, /↗ spawned/);
+	assert.match(out, /audit the config loader/);
+	assert.ok(!out.includes("✗"), "no error glyph");
+	assert.ok(!out.includes("unknown"), "no unknown state word");
+	assert.ok(!out.includes("NaN"), "no NaN duration");
+	assert.ok(!out.includes("↑"), "no token bits");
+	assert.ok(!out.includes("↓"), "no token bits");
+});
+
 test("tool card: renderCall shows identity + task", async () => {
 	const { renderCall } = await loadTool();
 	const out = flat(renderCall({ role: "research", task: "audit the auth module for token expiry bugs in the token handling path which is long", model: "zai/glm-5.3" }, theme));

@@ -3,7 +3,7 @@
   "feature": "async/background delegation (SPEC R8\u2013R19)",
   "goalBaseline": "0.3.2 @ c5f14a6, SPEC APPROVED 2026-09-09",
   "finalState": {
-    "version": "0.6.3",
+    "version": "0.6.4",
     "gates": {
       "typecheck": "0 errors",
       "unit": "178/178 (143 pre-existing semantics preserved; inventory assertions updated for spec-mandated additions: delegate_status/delegate_send/delegate_answer tools, 4 message renderers, strict 4-tool set)",
@@ -94,6 +94,16 @@
       "renderProof": "pi --export of a swapped copy of this session: embedded base64 session-data contains H3 headers + single-line comments; marked renders <h3>, comment-invisible, ## Outcome as <h2>; panel keeps --customMessageBg styling",
       "dogfood": "implementation ran as the session's SECOND background delegation; its mid-run ask_parent note (concern channel) flagged the false-positive test failures live \u2014 the R18 channel's first production use",
       "shipped": "0.6.3"
+    },
+    "M8": {
+      "status": "gate-passed (render fix, user-reported from export)",
+      "gate": "typecheck 0; unit 184/184 (parent-verified); check-vendored 16/16 after propagating the spawned case to the canonical kit asset + syncing model-discovery",
+      "requirements": [
+        "background-spawn result card: \u2197 spawned (muted), description-only state bits, no \u2717/unknown/NaN/tokens"
+      ],
+      "rootCause": "background-start details {runId,role,background,description} took the foreground full-card path; state/durationMs/usage absent \u2192 stateGlyph default \u2717/unknown + NaN; pi persists the rendered card into the session JSONL and the export embeds it verbatim",
+      "dogfood": "fix implemented by background delegation del_\u2026c8333b7c (session's third background run)",
+      "shipped": "0.6.4"
     }
   },
   "knownGaps": [
