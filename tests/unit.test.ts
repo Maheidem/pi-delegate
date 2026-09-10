@@ -892,3 +892,105 @@ test("classify: tool_end failure flag is authoritative, never content-derived", 
 	) as { result?: { isError?: boolean } };
 	assert.equal(okButAlarming.result?.isError, false, "content mentioning 'error' is not a failure");
 });
+
+// ── R22: execution mode classification (default: background) ────────────
+
+test("R22 config: defaultExecution defaults to background, normalizes both words, ignores junk", () => {
+	assert.equal(DEFAULT_DELEGATE_CONFIG.defaultExecution, "background");
+	assert.equal(normalizeConfig({}).config.defaultExecution, "background");
+	assert.equal(normalizeConfig({ defaultExecution: "foreground" }).config.defaultExecution, "foreground");
+	assert.equal(normalizeConfig({ defaultExecution: "background" }).config.defaultExecution, "background");
+	// invalid values keep the default (applyKnownField normalization)
+	assert.equal(normalizeConfig({ defaultExecution: "fg" }).config.defaultExecution, "background");
+	assert.equal(normalizeConfig({ defaultExecution: 42 }).config.defaultExecution, "background");
+	assert.equal(normalizeConfig({ defaultExecution: null }).config.defaultExecution, "background");
+});
+
+test("R22 config: project overlay carries defaultExecution", async () => {
+	const { loadConfigCascade, projectConfigPath } = await import("../config.ts");
+	const fs = await import("node:fs");
+	const os = await import("node:os");
+	const path = await import("node:path");
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-exec-"));
+	const agentDir = path.join(dir, "agent");
+	const proj = path.join(dir, "proj");
+	fs.mkdirSync(path.join(agentDir, "delegate"), { recursive: true });
+	fs.writeFileSync(path.join(agentDir, "delegate", "config.json"), JSON.stringify({ schemaVersion: 1, defaultExecution: "foreground" }));
+	const res = loadConfigCascade(agentDir, path.join(dir, "no-proj"));
+	assert.equal(res.config.defaultExecution, "foreground", "user-wide defaultExecution loads");
+	fs.mkdirSync(path.dirname(projectConfigPath(proj)), { recursive: true });
+	fs.writeFileSync(projectConfigPath(proj), JSON.stringify({ defaultExecution: "background" }));
+	const res2 = loadConfigCascade(agentDir, proj);
+	assert.equal(res2.config.defaultExecution, "background", "project overlay overrides");
+	assert.ok(res2.projectOverrides.includes("defaultExecution"));
+});
+
+test("R22 app: defaultExecution() + patchDefaultExecution() persist through saveConfig", async () => {
+	const { DelegateApplicationImpl } = await import("../application.ts");
+	const fs = await import("node:fs");
+	const os = await import("node:os");
+	const path = await import("node:path");
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-exec-app-"));
+	const app = new DelegateApplicationImpl({ agentDir: dir, config: { ...DEFAULT_DELEGATE_CONFIG } });
+	assert.equal(app.defaultExecution(), "background");
+	assert.equal(app.patchDefaultExecution("foreground"), null);
+	assert.equal(app.defaultExecution(), "foreground");
+	assert.ok(app.panelConfig().defaultExecution === "foreground");
+	// persisted (loadConfig reads the same file saveConfig wrote)
+	assert.equal(loadConfig(dir).config.defaultExecution, "foreground");
+	// cycle back + reject junk
+	assert.equal(app.patchDefaultExecution("background"), null);
+	assert.equal(app.defaultExecution(), "background");
+	assert.ok(app.patchDefaultExecution("bg" as never) !== null, "non-enum value rejected");
+});
+
+test("R22 grammar: --background / --foreground flags extract; both → invalid", async () => {
+	const { parseDelegateCommand, extractFlags } = await import("../commands.ts");
+	const a = extractFlags("do the thing --background");
+	assert.equal(a.task, "do the thing");
+	assert.equal(a.execution, "background");
+	const b = extractFlags("--foreground fix the bug now");
+	assert.equal(b.task, "fix the bug now");
+	assert.equal(b.execution, "foreground");
+	assert.equal(extractFlags("no flags").execution, undefined);
+	const both = extractFlags("task --background --foreground");
+	assert.ok(both.error?.includes("mutually exclusive"));
+	// grammar: run intent carries execution; mutual exclusion → invalid
+	const r1 = parseDelegateCommand("run general fix the bug --foreground");
+	assert.equal(r1.kind, "run");
+	if (r1.kind === "run") {
+		assert.equal(r1.execution, "foreground");
+		assert.equal(r1.task, "fix the bug");
+	}
+	const r2 = parseDelegateCommand("run general fix the bug --background");
+	if (r2.kind === "run") assert.equal(r2.execution, "background");
+	const r3 = parseDelegateCommand("plain task --foreground");
+	if (r3.kind === "run") assert.equal(r3.execution, "foreground");
+	assert.equal(parseDelegateCommand("run general x y z --background --foreground").kind, "invalid");
+	// resume carries execution too
+	const res1 = parseDelegateCommand("resume del_1 continue the work --foreground");
+	if (res1.kind === "resume") {
+		assert.equal(res1.execution, "foreground");
+		assert.equal(res1.task, "continue the work");
+	}
+});
+
+test("R22 grammar: /delegate fg mirrors bg (role optional, explicit foreground)", async () => {
+	const { parseDelegateCommand } = await import("../commands.ts");
+	const a = parseDelegateCommand("fg research read the spec now");
+	assert.equal(a.kind, "fg");
+	if (a.kind === "fg") {
+		assert.equal(a.role, "research");
+		assert.equal(a.task, "read the spec now");
+	}
+	const b = parseDelegateCommand("fg just do the thing");
+	if (b.kind === "fg") {
+		assert.equal(b.role, "general");
+		assert.equal(b.task, "just do the thing");
+	}
+	assert.equal(parseDelegateCommand("fg").kind, "invalid");
+	assert.equal(parseDelegateCommand("fg general").kind, "invalid");
+	// bg still means explicit background
+	const c = parseDelegateCommand("bg fix the flaky test");
+	if (c.kind === "bg") assert.equal(c.task, "fix the flaky test");
+});

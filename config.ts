@@ -27,6 +27,8 @@ export interface DelegateConfigV1 {
 	maxRuns: number;
 	maxRunAgeDays: number;
 	updateThrottleMs: number;
+	/** R22: default execution mode for delegations without an explicit override. */
+	defaultExecution: "background" | "foreground";
 	/** R9: concurrent background children (default 3, clamp 1–8). */
 	maxBackgroundRuns: number;
 	/** R17/R18: ask_parent channel (background children). */
@@ -52,6 +54,7 @@ export const DEFAULT_DELEGATE_CONFIG: DelegateConfigV1 = {
 	maxRuns: 50,
 	maxRunAgeDays: 30,
 	updateThrottleMs: 100,
+	defaultExecution: "background",
 	maxBackgroundRuns: 3,
 	askParent: {
 		enabled: true,
@@ -142,6 +145,13 @@ function applyKnownField(config: DelegateConfigV1, key: string, value: unknown):
 		return;
 	}
 	// R17: nested askParent block — merge field-by-field with clamps.
+	if (key === "defaultExecution") {
+		// R22: accept exactly the two enum words; anything else keeps the default.
+		if (value === "background" || value === "foreground") {
+			config.defaultExecution = value;
+		}
+		return;
+	}
 	if (key === "askParent") {
 		if (!value || typeof value !== "object" || Array.isArray(value)) return;
 		const raw = value as Record<string, unknown>;

@@ -340,6 +340,28 @@ the invoking turn — the command resolves as soon as the child is spawned and
 registered, exactly as the tool call does.
 
 
+**R22 — Execution mode is a classification, not a category (default: background).**
+Role (general/research) and execution mode (background/foreground) are ORTHOGONAL:
+mode is configured state, never a third kind of run. New config key
+`defaultExecution: "background" | "foreground"` (default **background**; project
+overlay applies; dashboard Advanced screen exposes it as a toggle row). The
+`delegate` tool's `background?: boolean` parameter changes meaning: ABSENT =
+follow the configured default; `true`/`false` are explicit overrides. The
+3–6-word `description` (R8 validation, R20 derivation for slash/panel launches)
+is REQUIRED for EVERY delegation, foreground included — uniform receipts and
+headers; foreground returns it inline in the result header. Slash surface:
+`/delegate run [general|research] <task>` follows the configured default;
+`--background` / `--foreground` flags override per-run (resume too);
+`/delegate bg` remains the explicit background shorthand and `/delegate fg
+<task>` joins as the foreground exception path. The dashboard offers exactly
+TWO role-based run actions honoring the effective mode — the "Run background
+task…" action is REMOVED; per-run foreground is reachable via the flag or the
+Advanced toggle only (user decision 2026-09-10). Foreground semantics (one-child
+queue, E_DELEGATE_BUSY, live feed) are unchanged but become the EXCEPTION lane;
+model guidance flips: background by default, foreground only when the next step
+depends on the result. Pre-existing e2e scenarios that test foreground behavior
+pass `--foreground` explicitly, which makes their intent truthful.
+
 **R21 — Rendered-view presentation (export + TUI).** Custom-message content is
 read by TWO audiences: the model (raw content, verbatim) and rendered views
 (pi's HTML export renders `display: true` custom messages as markdown in a

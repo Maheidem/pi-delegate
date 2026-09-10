@@ -19,11 +19,12 @@ export type DelegateIntent =
 	| { kind: "help" }
 	| { kind: "cancel"; runId?: string }
 	| { kind: "answer"; runId: string; text: string }
-	| { kind: "bg"; role: RoleName; task: string; timeoutMs?: number }
+	| { kind: "bg"; role: RoleName; task: string; timeoutMs?: number; execution?: "background" | "foreground" }
+	| { kind: "fg"; role: RoleName; task: string; timeoutMs?: number; execution?: "background" | "foreground" }
 	| { kind: "inspect"; runId?: string }
-	| { kind: "resume"; runId?: string; task: string; timeoutMs?: number }
+	| { kind: "resume"; runId?: string; task: string; timeoutMs?: number; execution?: "background" | "foreground" }
 	| { kind: "peek"; runId?: string }
-	| { kind: "run"; role: RoleName; task: string; explicit: boolean; timeoutMs?: number }
+	| { kind: "run"; role: RoleName; task: string; explicit: boolean; timeoutMs?: number; execution?: "background" | "foreground" }
 	| { kind: "invalid"; token: string; usage: string };
 
 export const DELEGATE_USAGE = [
@@ -38,9 +39,10 @@ export const DELEGATE_USAGE = [
 	"/delegate peek [run-id]             live/final feed of a run's child activity",
 	"/delegate inspect [run-id]          show run metadata (defaults to latest)",
 	"/delegate run <general|research> <task...>   run with an explicit role",
+	"/delegate fg [general|research] <task...>   run in the FOREGROUND (blocks until done)",
 	"/delegate research <task...>        research-role shorthand",
 	"/delegate <task...>                 general-role shorthand",
-	"flags (run/research/<task>): --timeout <90s|10m|2h|1d|ms>",
+	"flags (run/research/<task>): --timeout <90s|10m|2h|1d|ms> --background --foreground (mutually exclusive)",
 	"timeout priority: per-invocation > project .pi/delegate/config.json > user ~/.pi/agent/delegate/config.json",
 	"/delegate help                      this help",
 ].join("\n");
@@ -55,6 +57,7 @@ export const RESERVED_FIRST_TOKENS = new Set([
 	"cancel",
 	"answer",
 	"bg",
+	"fg",
 	"inspect",
 	"resume",
 	"peek",
@@ -75,9 +78,9 @@ export function parseDelegateCommand(input: string, options: ParseOptions = {}):
 	if (!RESERVED_FIRST_TOKENS.has(first)) {
 		// General-role shorthand. `research` is reserved, so a general task
 		// that starts with that word must use `run general ...`.
-		const { task, timeoutMs } = extractFlags(trimmed);
+		const { task, timeoutMs, execution } = extractFlags(trimmed);
 		if (!task) return invalid(first);
-		return { kind: "run", role: "general", task, explicit: false, timeoutMs };
+		return { kind: "run", role: "general", task, explicit: false, timeoutMs, ...(execution ? { execution } : {}) };
 	}
 
 	switch (first) {
@@ -117,47 +120,65 @@ export function parseDelegateCommand(input: string, options: ParseOptions = {}):
 		case "resume": {
 			const rest = trimmed.slice("resume".length).trim();
 			if (!rest) return invalid("resume");
-			const { task, timeoutMs } = extractFlags(rest);
+			const { task, timeoutMs, execution } = extractFlags(rest);
 			const runId = task.split(/\s+/)[0] ?? "";
 			const body = task.slice(runId.length).trim();
 			if (!runId || !body) return invalid("resume");
-			return { kind: "resume", runId, task: body, timeoutMs };
+			return { kind: "resume", runId, task: body, timeoutMs, ...(execution ? { execution } : {}) };
 		}
 		case "bg": {
 			// R20: user-facing background launch — /delegate bg [general|research] <task>
 			const rest = trimmed.slice("bg".length).trim();
 			if (!rest) return invalid("bg");
-			const { task, timeoutMs } = extractFlags(rest);
+			const { task, timeoutMs, execution } = extractFlags(rest);
 			if (!task) return invalid("bg");
 			const parts = task.split(/\s+/);
 			const roleToken = parts[0]!;
 			if (roleToken === "general" || roleToken === "research") {
 				const body = parts.slice(1).join(" ").trim();
 				if (!body) return invalid("bg");
-				return { kind: "bg", role: roleToken, task: body, timeoutMs };
+				return { kind: "bg", role: roleToken, task: body, timeoutMs, ...(execution ? { execution } : {}) };
 			}
-			return { kind: "bg", role: "general", task, timeoutMs };
+			return { kind: "bg", role: "general", task, timeoutMs, ...(execution ? { execution } : {}) };
 		}
-		case "run": {
-			const rest = trimmed.slice("run".length).trim();
-			if (!rest) return invalid("run");
-			const { task, timeoutMs } = extractFlags(rest);
+		case "fg": {
+			// R22: explicit foreground shorthand — mirrors `bg` (role prefix
+			// optional, defaults to general), but means FOREGROUND.
+			const rest = trimmed.slice("fg".length).trim();
+			if (!rest) return invalid("fg");
+			const { task, timeoutMs, execution } = extractFlags(rest);
+			if (!task) return invalid("fg");
 			const parts = task.split(/\s+/);
 			const roleToken = parts[0]!;
 			if (roleToken === "general" || roleToken === "research") {
 				const body = parts.slice(1).join(" ").trim();
-				if (!body) return invalid("run");
-				return { kind: "run", role: roleToken, task: body, explicit: true, timeoutMs };
+				if (!body) return invalid("fg");
+				return { kind: "fg", role: roleToken, task: body, timeoutMs, ...(execution ? { execution } : {}) };
 			}
-			// `run <task...>` — role defaults to general.
-			return { kind: "run", role: "general", task, explicit: true, timeoutMs };
+			return { kind: "fg", role: "general", task, timeoutMs, ...(execution ? { execution } : {}) };
+		}
+		case "run": {
+			const rest = trimmed.slice("run".length).trim();
+			if (!rest) return invalid("run");
+			const { task, timeoutMs, execution } = extractFlags(rest);
+			const parts = task.split(/\s+/);
+			const roleToken = parts[0]!;
+			if (roleToken === "general" || roleToken === "research") {
+				const body = parts.slice(1).join(" ").trim();
+			if (!body) return invalid("run");
+				return { kind: "run", role: roleToken, task: body, explicit: true, timeoutMs, ...(execution ? { execution } : {}) };
+			}
+			// `run <task...>` — role defaults to general. A flag error (e.g.
+			// --background + --foreground) also lands here with an empty task.
+			if (!task) return invalid("run");
+			return { kind: "run", role: "general", task, explicit: true, timeoutMs, ...(execution ? { execution } : {}) };
 		}
 		case "research": {
 			const rest = trimmed.slice("research".length).trim();
 			if (!rest) return invalid("research");
-			const { task, timeoutMs } = extractFlags(rest);
+			const { task, timeoutMs, execution } = extractFlags(rest);
 			if (!task) return invalid("research");
-			return { kind: "run", role: "research", task, explicit: true, timeoutMs };
+			return { kind: "run", role: "research", task, explicit: true, timeoutMs, ...(execution ? { execution } : {}) };
 		}
 	}
 	return invalid(first);
@@ -171,7 +192,7 @@ function invalid(token: string): DelegateIntent {
 export function delegateCompletions(prefix: string, recentRunIds: string[] = []): string[] {
 	const words = (prefix ?? "").trimStart();
 	const tokens = words.split(/\s+/);
-	const base: string[] = ["on", "off", "status", "paths", "doctor", "help", "cancel ", "answer ", "bg ", "inspect ", "resume ", "peek ", "run ", "research "];
+	const base: string[] = ["on", "off", "status", "paths", "doctor", "help", "cancel ", "answer ", "bg ", "fg ", "inspect ", "resume ", "peek ", "run ", "research "];
 
 	const matches: string[] = [];
 	if (tokens.length <= 1) {
@@ -192,7 +213,7 @@ export function delegateCompletions(prefix: string, recentRunIds: string[] = [])
 		}
 	}
 	// De-duplicate, keep order, cap for the TUI (all primary verbs fit).
-	return [...new Set(matches)].slice(0, 14);
+	return [...new Set(matches)].slice(0, 15);
 }
 
 /**
@@ -200,10 +221,13 @@ export function delegateCompletions(prefix: string, recentRunIds: string[] = [])
  * Unknown flags are kept in the task text; a malformed duration yields a
  * stable error message.
  */
-export function extractFlags(input: string): { task: string; timeoutMs?: number; error?: string } {
+export function extractFlags(input: string): { task: string; timeoutMs?: number; execution?: "background" | "foreground"; error?: string } {
 	const tokens = input.split(/\s+/).filter(Boolean);
 	const kept: string[] = [];
 	let timeoutMs: number | undefined;
+	let execution: "background" | "foreground" | undefined;
+	let bg = 0;
+	let fg = 0;
 	for (let i = 0; i < tokens.length; i++) {
 		const t = tokens[i]!;
 		if (t === "--timeout") {
@@ -219,9 +243,22 @@ export function extractFlags(input: string): { task: string; timeoutMs?: number;
 			}
 			continue;
 		}
+		if (t === "--background") {
+			bg += 1;
+			execution = "background";
+			continue;
+		}
+		if (t === "--foreground") {
+			fg += 1;
+			execution = "foreground";
+			continue;
+		}
 		kept.push(t);
 	}
-	return { task: kept.join(" "), timeoutMs };
+	if (bg > 0 && fg > 0) {
+		return { task: "", error: "--background and --foreground are mutually exclusive" };
+	}
+	return { task: kept.join(" "), timeoutMs, ...(execution ? { execution } : {}) };
 }
 
 /**

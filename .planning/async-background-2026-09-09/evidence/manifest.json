@@ -3,7 +3,7 @@
   "feature": "async/background delegation (SPEC R8\u2013R19)",
   "goalBaseline": "0.3.2 @ c5f14a6, SPEC APPROVED 2026-09-09",
   "finalState": {
-    "version": "0.6.4",
+    "version": "0.7.0",
     "gates": {
       "typecheck": "0 errors",
       "unit": "178/178 (143 pre-existing semantics preserved; inventory assertions updated for spec-mandated additions: delegate_status/delegate_send/delegate_answer tools, 4 message renderers, strict 4-tool set)",
@@ -17,7 +17,8 @@
         "Q": "strict mode: 4-tool set active, question delivered, delegate_answer usable, run succeeds",
         "R": "user-intercept command surface: unknown-runId instructive error, malformed usage rejected, no-pending error, run unaffected"
       }
-    }
+    },
+    "e2e": "95/95 (A\u2013T) post-R22"
   },
   "milestones": {
     "M1": {
@@ -104,6 +105,16 @@
       "rootCause": "background-start details {runId,role,background,description} took the foreground full-card path; state/durationMs/usage absent \u2192 stateGlyph default \u2717/unknown + NaN; pi persists the rendered card into the session JSONL and the export embeds it verbatim",
       "dogfood": "fix implemented by background delegation del_\u2026c8333b7c (session's third background run)",
       "shipped": "0.6.4"
+    },
+    "M9": {
+      "status": "gate-passed (R22, user concept change)",
+      "gate": "typecheck 0; unit 189/189; e2e 95/95 on zai/glm-5.3 (A\u2013K,T 41/41 incl. new default-flip scenario T; L\u2013S 54/54)",
+      "requirements": [
+        "R22 execution mode as classification: defaultExecution=background config + Advanced toggle; background param = override (absent=follow default); description REQUIRED for every delegation (derived for slash/panel); --background/--foreground flags; /delegate fg; two role-based panel actions (run-background row removed); foreground = exception lane"
+      ],
+      "userDecisions": "panel foreground = flag+toggle only; description always required",
+      "dogfood": "implementation by background delegation del_\u2026918ae832 (session's fifth background run)",
+      "shipped": "0.7.0"
     }
   },
   "knownGaps": [

@@ -361,7 +361,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		const secs = Math.round(d.durationMs / 1000);
 		const head =
 			`[delegate v${delegateVersion()} · ${d.runId} · ${d.role} · ${stateLabel} in ${secs}s` +
-			`${d.model ? ` · ${d.model}` : ""}${d.timeoutInfo ? ` · ${d.timeoutInfo}` : ""}]`;
+			`${d.model ? ` · ${d.model}` : ""}${d.timeoutInfo ? ` · ${d.timeoutInfo}` : ""}${d.description ? ` · ${d.description}` : ""}]`;
 		if (!res.ok) {
 			const parts = [head];
 			const err = res.error ? `${res.error.code}: ${res.error.message}` : "unknown failure";
@@ -429,15 +429,13 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		})),
 		background: Type.Optional(Type.Boolean({
 			description:
-				"Run this delegation in the background: the call returns a runId immediately and the terminal report " +
-				"arrives later as a message. Use it for long builds, test matrices, or research that should not block " +
-				"this turn. Requires 'description'. Poll with the delegate_status pattern or wait for the report message.",
+				"Execution mode override: absent = follow the configured default (background unless changed in Advanced config); " +
+				"true = background, false = foreground.",
 		})),
-		description: Type.Optional(Type.String({
-			description:
-				"Required with background=true: a 3-to-6-word purpose summary for the user, e.g. 'Run full test matrix'. " +
-				"Describes the work, not the mechanism. Single line.",
-		})),
+		description: Type.String({ minLength: 1, description:
+			"A 3-to-6-word purpose summary for the user, e.g. 'Run full test matrix'. Required for EVERY delegation " +
+			"(background and foreground). Describes the work, not the mechanism. Single line.",
+		}),
 	});
 
 	pi.registerTool({
@@ -446,14 +444,17 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		description:
 			"Delegate a self-contained subtask to an isolated child Pi session with a bounded final handoff. " +
 			"Roles: general (implementation, write-capable) and research (read-only web research via Firecrawl, optionally supplemented by Reddit). " +
-			"The child does not see parent history; include all objective, relevant paths, constraints, and acceptance criteria in the task.",
+			"The child does not see parent history; include all objective, relevant paths, constraints, and acceptance criteria in the task. " +
+		"Background is the default execution mode; use background: false only when the very next step depends on the result.",
 		promptSnippet: "Delegate a bounded subtask (implementation or research) to an isolated child session",
 		promptGuidelines: [
 			"Use delegate autonomously when a bounded subtask would consume substantial parent context, benefits from a specialist tool ceiling, or needs independent verification.",
 			"Pass the objective, relevant paths, constraints, and acceptance criteria in the delegate task text; the child cannot see parent history.",
 			"Do not use delegate for trivial one-step work, or when most of the parent history would have to be copied into the task.",
 			"Parallel delegate calls are fine: they queue and run back-to-back (one child at a time) — every call gets a real result; do not re-issue on 'queue full', wait for the in-flight results instead.",
-			"Use background=true (with a 3–6-word description) for long builds, test matrices, or research that should not block this turn: the call returns a runId immediately and the terminal report arrives later as a message. Check progress with delegate_status; do not wait inline.",
+			"Background is the DEFAULT execution mode (an absent background parameter follows the configured default, normally background): the call returns a runId immediately and the terminal report arrives later as a message. Check progress with delegate_status; do not wait inline.",
+			"Use foreground (background: false) ONLY when the very next step depends on the delegation's result; the call then blocks this turn until the child finishes.",
+			"A 3–6-word description is REQUIRED for every delegation, foreground included.",
 			"Treat background terminal reports as internal work events: acknowledge them to the user with at most one line; do not re-narrate the handoff unless material.",
 			"On E_BACKGROUND_FULL, do not re-issue the task: check delegate_status and wait for terminal reports to free slots.",
 			"Steer live background runs with delegate_send (course corrections apply at the child's next model call); reserve resumeFrom for finished runs.",
@@ -480,16 +481,21 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			const modelExtra = typeof params.model === "string" && params.model.trim() ? params.model.trim() : undefined;
 			const resumeExtra = typeof params.resumeFrom === "string" && params.resumeFrom.trim() ? params.resumeFrom.trim() : undefined;
 
+			// R22: description is required for EVERY delegation (both modes) —
+			// validate before any side effect.
+			const desc = validateBackgroundDescription(params.description);
+			if (!desc.ok) {
+				return {
+					content: [{ type: "text" as const, text: `description invalid: ${desc.error}` }],
+					details: {} satisfies Record<string, unknown>,
+					isError: true,
+				};
+			}
+			// R22: absent background parameter follows the configured default.
+			const effectiveBackground = params.background === undefined ? app.defaultExecution() === "background" : params.background;
+
 			// R8: background path — validate, slot-check, spawn, return runId.
-			if (params.background === true) {
-				const desc = validateBackgroundDescription(params.description);
-				if (!desc.ok) {
-					return {
-						content: [{ type: "text" as const, text: `description invalid: ${desc.error}` }],
-						details: {} satisfies Record<string, unknown>,
-						isError: true,
-					};
-				}
+			if (effectiveBackground) {
 				const slot = background.slotError();
 				if (slot) {
 						return {
@@ -530,6 +536,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			const request = buildRequest(params.task, params.role ?? config.defaultRole, "tool", ctx, timeoutMs, {
 				model: modelExtra,
 				resumeFrom: resumeExtra,
+				description: desc.value,
 			});
 			refreshDoctor(ctx);
 			const hooks = {
@@ -894,7 +901,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		}
 	};
 
-	const runCommandForeground = async (task: string, role: "general" | "research", ctx: ExtensionCommandContext, timeoutMs?: number, extras?: { resumeFrom?: string }): Promise<void> => {
+	const runCommandForeground = async (task: string, role: "general" | "research", ctx: ExtensionCommandContext, timeoutMs?: number, extras?: { resumeFrom?: string; description?: string }): Promise<void> => {
 		const request = buildRequest(task, role, "command", ctx, timeoutMs, extras);
 		refreshDoctor(ctx);
 		let lastText = `[delegate] starting ${role} run…`;
@@ -1009,7 +1016,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 	// R20: user-facing background launch — /delegate bg and the dashboard
 	// action spawn a background run (description derived from the task's
 	// first line) and return immediately; the report arrives later.
-	const runCommandBackground = async (task: string, role: "general" | "research", ctx: ExtensionCommandContext, timeoutMs?: number): Promise<void> => {
+	const runCommandBackground = async (task: string, role: "general" | "research", ctx: ExtensionCommandContext, timeoutMs?: number, extras?: { resumeFrom?: string }): Promise<void> => {
 		const desc = deriveBackgroundDescription(task);
 		if (!desc.ok) {
 			say(ctx, `[delegate] ${desc.error}`, "error");
@@ -1023,6 +1030,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		const request = buildRequest(task, role, "command", ctx, timeoutMs, {
 			background: true,
 			description: desc.value,
+			...(extras?.resumeFrom ? { resumeFrom: extras.resumeFrom } : {}),
 		});
 		refreshDoctor(ctx);
 		const attempt = app.runBackground(request, {
@@ -1034,6 +1042,21 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		}
 		background.register(attempt.handle);
 		say(ctx, formatBackgroundStartedText(attempt.handle.runId, attempt.handle.role, attempt.handle.description));
+	};
+
+	// R22: a foreground launch from the user surface (slash/panel) also needs
+	// a description — derive it from the task's first line exactly like the
+	// background path (R20) and pass it to the foreground run.
+	const launchForeground = async (task: string, role: "general" | "research", ctx: ExtensionCommandContext, timeoutMs?: number, extras?: { resumeFrom?: string }): Promise<void> => {
+		const desc = deriveBackgroundDescription(task);
+		if (!desc.ok) {
+			say(ctx, `[delegate] ${desc.error}`, "error");
+			return;
+		}
+		await runCommandForeground(task, role, ctx, timeoutMs, {
+			...(extras?.resumeFrom ? { resumeFrom: extras.resumeFrom } : {}),
+			description: desc.value,
+		});
 	};
 
 	const statusText = (ctx: ExtensionContext): string => {
@@ -1079,7 +1102,9 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			"/delegate run general <task>       run a delegation with a role",
 			"/delegate research <task>         research role",
 			"/delegate bg [role] <task>        run it in the background (report arrives later)",
+			"/delegate fg [role] <task>        run it in the foreground (blocks until done)",
 			"/delegate <task>                   general-role shorthand",
+			"flags (run/research/<task>): --timeout <90s|10m|2h|1d> --background --foreground",
 			"/delegate cancel [run-id]        cancel the active run",
 			"/delegate answer <run-id> <text>   answer a blocked background child's question",
 			"/delegate resume <run-id> <task> resume a prior run's child session",
@@ -1195,10 +1220,18 @@ export default function delegateExtension(pi: ExtensionAPI) {
 						say(ctx, `[delegate] invalid role '${intent.role}'. Use general or research.`, "error");
 						return;
 					}
-					await runCommandForeground(intent.task, intent.role, ctx, intent.timeoutMs);
+					// R22: run follows the configured default unless a flag overrides.
+					if ((intent.execution ?? app.defaultExecution()) === "foreground") {
+						await launchForeground(intent.task, intent.role, ctx, intent.timeoutMs);
+					} else {
+						await runCommandBackground(intent.task, intent.role, ctx, intent.timeoutMs);
+					}
 					return;
 				case "bg":
 					await runCommandBackground(intent.task, isRoleName(intent.role) ? intent.role : "general", ctx, intent.timeoutMs);
+					return;
+				case "fg":
+					await launchForeground(intent.task, isRoleName(intent.role) ? intent.role : "general", ctx, intent.timeoutMs);
 					return;
 				case "peek": {
 					const id = intent.runId?.trim() || app.mostRecentRunId();
@@ -1216,7 +1249,12 @@ export default function delegateExtension(pi: ExtensionAPI) {
 						say(ctx, `[delegate] usage: /delegate resume <run-id> <continuation task...>`, "error");
 						return;
 					}
-					await runCommandForeground(intent.task, "general", ctx, intent.timeoutMs, { resumeFrom: runId });
+					// R22: resume follows the configured default unless a flag overrides.
+					if ((intent.execution ?? app.defaultExecution()) === "foreground") {
+						await launchForeground(intent.task, "general", ctx, intent.timeoutMs, { resumeFrom: runId });
+					} else {
+						await runCommandBackground(intent.task, "general", ctx, intent.timeoutMs, { resumeFrom: runId });
+					}
 					return;
 				}
 				case "invalid":
@@ -1308,6 +1346,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 				{ key: "cfg:user:maxResultBytes", label: "Max result bytes", value: String(c.maxResultBytes), rawValue: String(c.maxResultBytes), kind: "input" },
 				{ key: "cfg:user:updateThrottleMs", label: "Update throttle", value: formatDuration(c.updateThrottleMs), rawValue: String(c.updateThrottleMs), kind: "input", inputHint: "live update cadence" },
 				{ key: "info:defaultRole", label: "Default role", value: c.defaultRole, kind: "info" },
+				{ key: "exec-default-toggle", label: "Execution default", value: c.defaultExecution, kind: "action" },
 				{ key: "info:retention", label: "Retention", value: `${c.maxRuns} runs · ${c.maxRunAgeDays}d`, kind: "info" },
 			];
 		};
@@ -1328,7 +1367,16 @@ export default function delegateExtension(pi: ExtensionAPI) {
 							if (!m) return `Unknown setting '${key}'.`;
 							return app.patchConfig(m[1]!, raw);
 						},
-						activate: (): PanelActionResult => ({ kind: "close", action: "advanced-done" }),
+						activate: (key): PanelActionResult => {
+							// R22: the execution-default toggle cycles background ⇄ foreground
+							// in place (action row, no editor input).
+							if (key === "exec-default-toggle") {
+								const next = app.panelConfig().defaultExecution === "background" ? "foreground" : "background";
+								const err = app.patchDefaultExecution(next);
+								return err ? { kind: "error", message: err } : { kind: "updated", message: `Execution default: ${next}` };
+							}
+							return { kind: "close", action: "advanced-done" };
+						},
 						requestRender: () => tui.requestRender(),
 						done,
 					}),
@@ -1415,7 +1463,6 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			rows: [
 				{ key: "run-general", label: "Run general task…", value: "", kind: "action" },
 				{ key: "run-research", label: "Run research task…", value: "", kind: "action" },
-				{ key: "run-background", label: "Run background task…", value: "", kind: "action" },
 				{ key: "peek", label: "Peek live / final detail", value: "", kind: "action", disabled: !active && !last },
 				{ key: "cancel", label: "Cancel active run", value: "", kind: "action", disabled: !active },
 				{ key: "resume", label: "Resume last run…", value: "", kind: "action", disabled: !last },
@@ -1504,14 +1551,12 @@ export default function delegateExtension(pi: ExtensionAPI) {
 				const role = action === "run-research" ? ("research" as const) : ("general" as const);
 				const task = await ctx.ui.editor(`Delegated task (${role})`, "");
 				if (!task || !task.trim()) continue;
-				await runCommandForeground(task, role, ctx);
-				continue;
-			}
-			// R20: user-facing background launch — spawn, return immediately.
-			if (action === "run-background") {
-				const task = await ctx.ui.editor("Background task (returns immediately)", "");
-				if (!task || !task.trim()) continue;
-				await runCommandBackground(task.trim(), "general", ctx);
+				// R22: role-based actions honor the effective (default) mode.
+				if (app.defaultExecution() === "foreground") {
+					await launchForeground(task, role, ctx);
+				} else {
+					await runCommandBackground(task, role, ctx);
+				}
 				continue;
 			}
 			if (action === "peek") {
@@ -1544,7 +1589,12 @@ export default function delegateExtension(pi: ExtensionAPI) {
 				}
 				const task = await ctx.ui.editor(`Resume ${target.runId.slice(-12)} (${target.role})`, "");
 				if (!task || !task.trim()) continue;
-				await runCommandForeground(task, target.role === "research" ? "research" : "general", ctx, undefined, { resumeFrom: target.runId });
+				const role = target.role === "research" ? ("research" as const) : ("general" as const);
+				if (app.defaultExecution() === "foreground") {
+					await launchForeground(task, role, ctx, undefined, { resumeFrom: target.runId });
+				} else {
+					await runCommandBackground(task, role, ctx, undefined, { resumeFrom: target.runId });
+				}
 				continue;
 			}
 			if (action === "strict-toggle") {

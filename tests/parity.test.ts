@@ -21,7 +21,8 @@ import { DEFAULT_DELEGATE_CONFIG } from "../config.ts";
 const PARITY: Array<{ panelKey: string; verb: string; method: string }> = [
 	{ panelKey: "run-general", verb: "run general", method: "run" },
 	{ panelKey: "run-research", verb: "research", method: "run" },
-	{ panelKey: "run-background", verb: "bg", method: "runBackground" },
+	// R22: the "run-background" action row was removed (two role-based actions only);
+	// the bg/fg verbs stay reachable as commands against runBackground/run.
 	{ panelKey: "peek", verb: "peek", method: "inspect" },
 	{ panelKey: "cancel", verb: "cancel", method: "cancel" },
 	{ panelKey: "resume", verb: "resume", method: "run" },
@@ -36,7 +37,7 @@ test("parity: every nested verb parses to a non-invalid intent", () => {
 		["status", "status"], ["paths", "paths"], ["doctor", "doctor"], ["help", "help"],
 		["on", "enable"], ["off", "disable"], ["cancel", "cancel"], ["inspect", "inspect"],
 		["peek", "peek"], ["resume r1 do it", "resume"], ["run general hi", "run"],
-		["research hi", "run"], ["bg do the thing now", "bg"],
+		["research hi", "run"], ["bg do the thing now", "bg"], ["fg do the thing now", "fg"],
 	];
 	for (const [input, kind] of verbs) {
 		const intent = parseDelegateCommand(input);

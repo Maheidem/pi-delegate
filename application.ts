@@ -173,6 +173,33 @@ export class DelegateApplicationImpl implements DelegateApplication {
 		}
 	}
 
+	/**
+	 * R22: the configured default execution mode for delegations without
+	 * an explicit override (absent `background` parameter / no flag).
+	 */
+	defaultExecution(): "background" | "foreground" {
+		return this.liveConfig.defaultExecution;
+	}
+
+	/**
+	 * R22: toggle the default execution mode (dashboard Advanced screen).
+	 * Persists through the same saveConfig path as patchConfig; unlike
+	 * patchConfig it is NOT numeric. Returns an error string or null.
+	 */
+	patchDefaultExecution(value: "background" | "foreground"): string | null {
+		if (value !== "background" && value !== "foreground") {
+			return `Unknown execution mode '${value}'.`;
+		}
+		try {
+			const { config } = normalizeConfig({ ...(this.liveConfig as unknown as Record<string, unknown>), defaultExecution: value });
+			saveConfig(this.ports.agentDir, config);
+			this.liveConfig = config;
+			return null;
+		} catch (error) {
+			return `Save failed: ${(error as Error).message}`;
+		}
+	}
+
 	// ── Mode ───────────────────────────────────────────────────────────────
 
 	isStrict(): boolean {
@@ -217,7 +244,7 @@ export class DelegateApplicationImpl implements DelegateApplication {
 	}
 
 	/** Advanced knobs for the dashboard's Configure-advanced screen (§ S7). */
-	panelConfig(): Pick<DelegateConfigV1, "queueLimit" | "killGraceMs" | "handoffGraceMs" | "handoffEnforceTimeoutMs" | "stuckToolTimeoutMs" | "maxTaskBytes" | "maxResultBytes" | "updateThrottleMs" | "defaultRole" | "maxRuns" | "maxRunAgeDays"> {
+	panelConfig(): Pick<DelegateConfigV1, "queueLimit" | "killGraceMs" | "handoffGraceMs" | "handoffEnforceTimeoutMs" | "stuckToolTimeoutMs" | "maxTaskBytes" | "maxResultBytes" | "updateThrottleMs" | "defaultRole" | "defaultExecution" | "maxRuns" | "maxRunAgeDays"> {
 		const c = this.liveConfig;
 		return {
 			queueLimit: c.queueLimit,
@@ -229,6 +256,7 @@ export class DelegateApplicationImpl implements DelegateApplication {
 			maxResultBytes: c.maxResultBytes,
 			updateThrottleMs: c.updateThrottleMs,
 			defaultRole: c.defaultRole,
+			defaultExecution: c.defaultExecution,
 			maxRuns: c.maxRuns,
 			maxRunAgeDays: c.maxRunAgeDays,
 		};
@@ -344,7 +372,7 @@ export class DelegateApplicationImpl implements DelegateApplication {
 			} catch {
 				// cleanup failure is warning-only
 			}
-			return outcomeToRunResult(outcome, opened.metadata, role.name, model, request.thinkingLevel, { timeoutInfo, modelNote });
+			return outcomeToRunResult(outcome, opened.metadata, role.name, model, request.thinkingLevel, { timeoutInfo, modelNote, ...(request.description ? { description: request.description } : {}) });
 		} catch (error) {
 			this.activeRun = null;
 			return errorResult(opened.metadata.runId, role.name, "E_CHILD_EXIT", `Delegation failed unexpectedly: ${(error as Error).message}`);
@@ -908,7 +936,7 @@ function outcomeToRunResult(
 	role: RoleName,
 	model: string,
 	thinkingLevel?: string,
-	provenance?: { timeoutInfo?: string; modelNote?: string },
+	provenance?: { timeoutInfo?: string; modelNote?: string; description?: string },
 ): DelegateRunResult {
 	const ok = outcome.state === "succeeded";
 	const details: DelegateDetails = {
@@ -928,6 +956,8 @@ function outcomeToRunResult(
 		outputTruncated: outcome.outputTruncated,
 		...(outcome.partialHandoff ? { partialHandoff: outcome.partialHandoff } : {}),
 		...(provenance?.timeoutInfo ? { timeoutInfo: provenance.timeoutInfo } : {}),
+		// R22: foreground results return the validated description inline.
+		...(provenance?.description ? { description: provenance.description } : {}),
 		transcriptPath: outcome.transcriptPath,
 		stderrPath: outcome.stderrPath,
 		displayItems: outcome.displayItems,

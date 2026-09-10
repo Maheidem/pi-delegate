@@ -149,6 +149,9 @@ export interface DelegateDetails {
 sessionPath?: string;
 	/** R7: resolved timeout provenance, e.g. "hard 45m (per-run) · idle 22m30s". */
 	timeoutInfo?: string;
+	/** R22: validated 3–6-word purpose summary (required for every delegation;
+	 * returned inline in the foreground result header). */
+	description?: string;
 	transcriptPath: string;
 	stderrPath: string;
 	displayItems: DelegateDisplayItem[];

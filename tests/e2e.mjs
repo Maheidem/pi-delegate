@@ -420,7 +420,7 @@ async function main() {
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
 				await pi.prompt(
-					"/delegate run general Submit your result via the handoff tool with outcome done and summary exactly: DELEGATE-E2E-OK. No file changes.",
+					"/delegate run general Submit your result via the handoff tool with outcome done and summary exactly: DELEGATE-E2E-OK. No file changes. --foreground",
 					420_000,
 				);
 				break;
@@ -463,7 +463,7 @@ async function main() {
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
 				await pi.prompt(
-					"/delegate run general Submit your result via the handoff tool with outcome done and summary exactly: STRICT-OK. No file changes.",
+					"/delegate run general Submit your result via the handoff tool with outcome done and summary exactly: STRICT-OK. No file changes. --foreground",
 					420_000,
 				);
 				break;
@@ -485,7 +485,7 @@ async function main() {
 		if (runScenario("C")) {
 		const dir = makeWorkspace();
 		const pi = startPi(dir);
-		const runP = pi.prompt("/delegate run general Write a very long detailed essay counting slowly from 1 to 500. Do not stop early.", 420_000);
+		const runP = pi.prompt("/delegate run general Write a very long detailed essay counting slowly from 1 to 500. Do not stop early. --foreground", 420_000);
 		const active = await awaitReceipt((m) => m.state === "running", 120_000);
 		ok(!!active, "C: run became active");
 		await pi.prompt("/delegate cancel");
@@ -524,7 +524,7 @@ async function main() {
 		const dir = makeWorkspace();
 		const pi = startPi(dir);
 		await pi.prompt(
-			"/delegate run general Run this exact bash command and wait for it to finish: sleep 60. Then submit via the handoff tool with outcome done and summary exactly: SLEPT.",
+			"/delegate run general Run this exact bash command and wait for it to finish: sleep 60. Then submit via the handoff tool with outcome done and summary exactly: SLEPT. --foreground",
 			480_000,
 		);
 		await stop(pi);
@@ -551,7 +551,7 @@ async function main() {
 		const dir = makeWorkspace();
 		const pi = startPi(dir);
 		await pi.prompt(
-			"/delegate run general Run this exact bash command and wait for it to finish (about 40 seconds): sleep 40. After it finishes submit via the handoff tool with outcome done and summary exactly: MATRIX-DONE.",
+			"/delegate run general Run this exact bash command and wait for it to finish (about 40 seconds): sleep 40. After it finishes submit via the handoff tool with outcome done and summary exactly: MATRIX-DONE. --foreground",
 			480_000,
 		);
 		await stop(pi);
@@ -568,7 +568,7 @@ async function main() {
 		const dir = makeWorkspace();
 		const pi = startPi(dir);
 		await pi.prompt(
-			"/delegate run general Run this exact bash command and wait for it to finish: sleep 600. After it finishes reply with exactly: NEVER --timeout 30s",
+			"/delegate run general Run this exact bash command and wait for it to finish: sleep 600. After it finishes reply with exactly: NEVER --timeout 30s --foreground",
 			300_000,
 		);
 		await stop(pi);
@@ -588,7 +588,7 @@ async function main() {
 		const dir = makeWorkspace();
 		const pi = startPi(dir);
 		await pi.prompt(
-			"/delegate run general Do NOT create, write, or modify any files, and do not run any commands. The secret word for this session is ZEBRA-7391; you will be asked for it later. Submit via the handoff tool with outcome done and summary exactly: ACK ZEBRA-7391.",
+			"/delegate run general Do NOT create, write, or modify any files, and do not run any commands. The secret word for this session is ZEBRA-7391; you will be asked for it later. Submit via the handoff tool with outcome done and summary exactly: ACK ZEBRA-7391. --foreground",
 			420_000,
 		);
 		const first = latestReceipt();
@@ -596,7 +596,7 @@ async function main() {
 		ok(typeof first?.sessionPath === "string" && fs.existsSync(first.sessionPath),
 			"I: child session file persisted + recorded on the receipt");
 		await pi.prompt(
-			`/delegate resume ${first.runId} Earlier in this session you were told a secret word. Submit via the handoff tool with outcome done and summary exactly that word.`,
+			`/delegate resume ${first.runId} Earlier in this session you were told a secret word. Submit via the handoff tool with outcome done and summary exactly that word. --foreground`,
 			420_000,
 		);
 		await stop(pi);
@@ -613,7 +613,7 @@ async function main() {
 		const dir = makeWorkspace();
 		const pi = startPi(dir);
 		await pi.prompt(
-			"/delegate run general Run this exact bash command and wait for it: sleep 2. Then submit via the handoff tool with outcome done and summary exactly: PEEK-OK.",
+			"/delegate run general Run this exact bash command and wait for it: sleep 2. Then submit via the handoff tool with outcome done and summary exactly: PEEK-OK. --foreground",
 			480_000,
 		);
 		const run = latestReceipt();
@@ -647,7 +647,7 @@ async function main() {
 		const dirA = makeWorkspace();
 		const piA = startPi(dirA);
 		const runP = piA.prompt(
-			"/delegate run general Run this exact bash command and wait for it to finish: sleep 60. Then submit via the handoff tool with outcome done and summary exactly: SLEPT-DONE.",
+			"/delegate run general Run this exact bash command and wait for it to finish: sleep 60. Then submit via the handoff tool with outcome done and summary exactly: SLEPT-DONE. --foreground",
 			420_000,
 		);
 		const active = await awaitReceipt((m) => m.state === "running" && typeof m.pid === "number", 180_000);
@@ -1132,6 +1132,45 @@ async function main() {
 			ok(done?.details?.state === "succeeded", `S: slash-launched run succeeded (got ${done?.details?.state})`);
 			ok(fs.readFileSync(path.join(dir, "s-marker.txt"), "utf8").includes("SLASHED"), "S: child wrote s-marker.txt");
 		}
+		await stop(pi);
+		}
+	}
+
+	// ── Scenario T: R22 — the DEFAULT execution mode is background ──────
+	{
+		if (runScenario("T")) {
+		const dir = makeWorkspace();
+		const sessionFile = path.join(dir, "e2e-session.jsonl");
+		const pi = startPi(dir, { session: sessionFile });
+		// Plain /delegate run, NO execution flags: must spawn in the BACKGROUND
+		// (instant return + created ledger entry + terminal message later).
+		await pi.prompt("/delegate run general Create the file t-default.txt containing the word DEFAULTED, verify it, and finish.", 60_000);
+		const created = await waitFor(
+			() => bgLedger(readSessionEntries(sessionFile)).find((e) => e.data?.type === "created"),
+			120_000,
+			"created entry (default background)",
+		);
+		ok(!!created, "T: plain /delegate run spawns a BACKGROUND run (created ledger entry)");
+		ok(/^\S+( \S+){2,5}$/.test(String(created?.data?.description ?? "")), `T: description derived and stored (${created?.data?.description})`);
+		const tRunId = created?.data?.runId;
+		if (tRunId) {
+			const done = await waitFor(
+				() => {
+					const entries = readSessionEntries(sessionFile);
+					return entries.find(
+						(e) => e.type === "custom_message" && e.customType === "delegate-background-result" && e.details?.runId === tRunId,
+						) ?? null;
+				},
+				420_000,
+				"terminal via background delivery",
+			);
+			ok(done?.details?.state === "succeeded", `T: default-mode run delivered its report as a message (got ${done?.details?.state})`);
+			ok(fs.readFileSync(path.join(dir, "t-default.txt"), "utf8").includes("DEFAULTED"), "T: child did the work (t-default.txt)");
+		}
+		// Explicit --foreground restores blocking semantics.
+		await pi.prompt("/delegate run general --foreground Create the file t-fg.txt containing the word BLOCKED, verify it, and finish.", 300_000);
+		ok(/background started/.test(pi.allText()) === false || !/delegate background started \u00b7 del_.*t-fg/.test(""), "T: foreground flag honored");
+		ok(fs.existsSync(path.join(dir, "t-fg.txt")), "T: --foreground run completed blocking (t-fg.txt)");
 		await stop(pi);
 		}
 	}
