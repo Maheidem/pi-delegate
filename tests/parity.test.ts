@@ -30,6 +30,10 @@ const PARITY: Array<{ panelKey: string; verb: string; method: string }> = [
 	{ panelKey: "inspect-last", verb: "inspect", method: "inspect" },
 	{ panelKey: "doctor", verb: "doctor", method: "doctor" },
 	{ panelKey: "paths", verb: "paths", method: "paths" },
+	// Advanced-config input rows (cfg:user:* / cfg:project:*) ⇄ set verbs.
+	{ panelKey: "cfg:user:queueLimit", verb: "set", method: "patchConfig" },
+	{ panelKey: "cfg:user:hardTimeoutMs", verb: "set", method: "patchConfig" },
+	{ panelKey: "cfg:project:hardTimeoutMs", verb: "set-project", method: "patchProjectConfig" },
 ];
 
 test("parity: every nested verb parses to a non-invalid intent", () => {
@@ -38,6 +42,7 @@ test("parity: every nested verb parses to a non-invalid intent", () => {
 		["on", "enable"], ["off", "disable"], ["cancel", "cancel"], ["inspect", "inspect"],
 		["peek", "peek"], ["resume r1 do it", "resume"], ["run general hi", "run"],
 		["research hi", "run"], ["bg do the thing now", "bg"], ["fg do the thing now", "fg"],
+		["set queueLimit 4", "set"], ["set-project hardTimeoutMs 1800000", "set-project"],
 	];
 	for (const [input, kind] of verbs) {
 		const intent = parseDelegateCommand(input);
@@ -57,7 +62,7 @@ test("parity: every panel action key has a command verb and an app method", () =
 
 test("parity: completions offer every primary verb", () => {
 	const done = delegateCompletions("").join(" ");
-	for (const verb of ["status", "cancel", "inspect", "peek", "resume", "run", "research", "doctor", "paths", "on", "off", "help"]) {
+	for (const verb of ["status", "cancel", "inspect", "peek", "resume", "run", "research", "doctor", "paths", "on", "off", "help", "set", "set-project"]) {
 		assert.ok(done.includes(verb), `completion lists "${verb}"`);
 	}
 });

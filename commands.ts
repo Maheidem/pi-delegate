@@ -25,6 +25,8 @@ export type DelegateIntent =
 	| { kind: "resume"; runId?: string; task: string; timeoutMs?: number; execution?: "background" | "foreground" }
 	| { kind: "peek"; runId?: string }
 	| { kind: "run"; role: RoleName; task: string; explicit: boolean; timeoutMs?: number; execution?: "background" | "foreground" }
+	| { kind: "set"; field: string; value: string }
+	| { kind: "set-project"; field: string; value: string }
 	| { kind: "invalid"; token: string; usage: string };
 
 export const DELEGATE_USAGE = [
@@ -39,6 +41,8 @@ export const DELEGATE_USAGE = [
 	"/delegate peek [run-id]             live/final feed of a run's child activity",
 	"/delegate inspect [run-id]          show run metadata (defaults to latest)",
 	"/delegate run <general|research> <task...>   run with an explicit role",
+	"/delegate set <field> <value>       set a user-wide config knob (e.g. set queueLimit 4)",
+	"/delegate set-project <field> <value>  set a knob in the project .pi/delegate/config.json overlay",
 	"/delegate fg [general|research] <task...>   run in the FOREGROUND (blocks until done)",
 	"/delegate research <task...>        research-role shorthand",
 	"/delegate <task...>                 general-role shorthand",
@@ -63,6 +67,8 @@ export const RESERVED_FIRST_TOKENS = new Set([
 	"peek",
 	"run",
 	"research",
+	"set",
+	"set-project",
 ]);
 
 export interface ParseOptions {
@@ -180,6 +186,24 @@ export function parseDelegateCommand(input: string, options: ParseOptions = {}):
 			if (!task) return invalid("research");
 			return { kind: "run", role: "research", task, explicit: true, timeoutMs, ...(execution ? { execution } : {}) };
 		}
+		case "set": {
+			// Panel≡command parity: the advanced-config input rows dispatch
+		// through patchConfig — `set` is their command twin. Field validation
+		// is a runtime concern (the app method owns it), not grammar.
+			const rest = trimmed.slice("set".length).trim();
+			const field = rest.split(/\s+/)[0] ?? "";
+			const value = rest.slice(field.length).trim();
+			if (!field || !value) return { kind: "invalid", token: "set", usage: "/delegate set <field> <value>" };
+			return { kind: "set", field, value };
+		}
+		case "set-project": {
+			// Same shape as `set`, but targets the project overlay file.
+			const rest = trimmed.slice("set-project".length).trim();
+			const field = rest.split(/\s+/)[0] ?? "";
+			const value = rest.slice(field.length).trim();
+			if (!field || !value) return { kind: "invalid", token: "set-project", usage: "/delegate set-project <field> <value>" };
+			return { kind: "set-project", field, value };
+		}
 	}
 	return invalid(first);
 }
@@ -192,7 +216,7 @@ function invalid(token: string): DelegateIntent {
 export function delegateCompletions(prefix: string, recentRunIds: string[] = []): string[] {
 	const words = (prefix ?? "").trimStart();
 	const tokens = words.split(/\s+/);
-	const base: string[] = ["on", "off", "status", "paths", "doctor", "help", "cancel ", "answer ", "bg ", "fg ", "inspect ", "resume ", "peek ", "run ", "research "];
+	const base: string[] = ["on", "off", "status", "paths", "doctor", "help", "cancel ", "answer ", "bg ", "fg ", "inspect ", "resume ", "peek ", "run ", "research ", "set ", "set-project "];
 
 	const matches: string[] = [];
 	if (tokens.length <= 1) {
@@ -213,7 +237,7 @@ export function delegateCompletions(prefix: string, recentRunIds: string[] = [])
 		}
 	}
 	// De-duplicate, keep order, cap for the TUI (all primary verbs fit).
-	return [...new Set(matches)].slice(0, 15);
+	return [...new Set(matches)].slice(0, 17);
 }
 
 /**

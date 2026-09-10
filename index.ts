@@ -1117,6 +1117,8 @@ export default function delegateExtension(pi: ExtensionAPI) {
 			"/delegate status                   stable status text",
 			"/delegate run general <task>       run a delegation with a role",
 			"/delegate research <task>         research role",
+			"/delegate set <field> <value>       set a user-wide config knob (e.g. set queueLimit 4)",
+			"/delegate set-project <field> <value>  set a knob in the project .pi/delegate/config.json overlay",
 			"/delegate bg [role] <task>        run it in the background (report arrives later)",
 			"/delegate fg [role] <task>        run it in the foreground (blocks until done)",
 			"/delegate <task>                   general-role shorthand",
@@ -1136,7 +1138,10 @@ export default function delegateExtension(pi: ExtensionAPI) {
 
 	const doctorText = (): string => {
 		const report = app.doctor();
-		const lines = [`[delegate doctor] ${report.ok ? "OK" : "ISSUES FOUND"}`];
+		const lines = [
+			`[delegate doctor] ${report.ok ? "OK" : "ISSUES FOUND"}`,
+			`version: v${delegateVersion()} (loaded at session start; /reload picks up newer installs)`,
+		];
 		for (const c of report.checks) lines.push(`  ${c.status === "ok" ? "✓" : c.status === "warning" ? "!" : "✗"} ${c.name}: ${c.detail}`);
 		return lines.join("\n");
 	};
@@ -1271,6 +1276,19 @@ export default function delegateExtension(pi: ExtensionAPI) {
 					} else {
 						await runCommandBackground(intent.task, "general", ctx, intent.timeoutMs, { resumeFrom: runId });
 					}
+					return;
+				}
+				case "set": {
+					// Panel≡command parity: same app method as the advanced-config
+					// input rows (cfg:user:*). patchConfig owns field validation.
+					const err = app.patchConfig(intent.field, intent.value);
+					say(ctx, err ? `[delegate] ${err}` : `[delegate] set ${intent.field} = ${intent.value} (user config)`, err ? "warning" : "info");
+					return;
+				}
+				case "set-project": {
+					// Same method as the cfg:project:* input rows.
+					const err = app.patchProjectConfig(ctx.cwd ?? process.cwd(), intent.field, intent.value);
+					say(ctx, err ? `[delegate] ${err}` : `[delegate] set ${intent.field} = ${intent.value} (project config)`, err ? "warning" : "info");
 					return;
 				}
 				case "invalid":

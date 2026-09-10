@@ -120,6 +120,18 @@ test("grammar: cancel/inspect default runId undefined", () => {
 	assert.deepEqual(parseDelegateCommand("inspect del_123"), { kind: "inspect", runId: "del_123" });
 });
 
+test("grammar: set/set-project parse field+value (validation is runtime)", () => {
+	assert.deepEqual(parseDelegateCommand("set queueLimit 4"), { kind: "set", field: "queueLimit", value: "4" });
+	assert.deepEqual(parseDelegateCommand("set-project hardTimeoutMs 30m"), { kind: "set-project", field: "hardTimeoutMs", value: "30m" });
+	// Unknown fields parse fine — patchConfig/patchProjectConfig reject at runtime.
+	assert.deepEqual(parseDelegateCommand("set nope 4"), { kind: "set", field: "nope", value: "4" });
+	assert.deepEqual(parseDelegateCommand("set-project nope 4"), { kind: "set-project", field: "nope", value: "4" });
+	// Missing field or value is a parse error.
+	assert.equal(parseDelegateCommand("set").kind, "invalid");
+	assert.equal(parseDelegateCommand("set queueLimit").kind, "invalid");
+	assert.equal(parseDelegateCommand("set-project").kind, "invalid");
+});
+
 test("grammar: invalid subcommands and empty tasks rejected; unknown words are shorthand", () => {
 	assert.equal(parseDelegateCommand("wat").kind, "run"); // shorthand → general
 	assert.equal((parseDelegateCommand("wat") as { role?: string }).role, "general");
