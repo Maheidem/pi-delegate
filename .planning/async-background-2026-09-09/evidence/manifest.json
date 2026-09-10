@@ -157,5 +157,14 @@
       "rootCause": "tests/run.mjs stripped only PI_DELEGATE_CHILD/RUN_ID/PARENT_PID; background children add PI_DELEGATE_ASK_DIR/BACKGROUND, which flipped child-mode registration expectations inside the child's env",
       "fix": "prefix-based guard (all PI_DELEGATE_*); verified green under simulated polluted env; lesson recorded in AGENTS.md"
     }
+  ],
+  "knownIssues": [
+    {
+      "id": "workbench-selftest-broken",
+      "found": "2026-09-10 while closing the canonical-format.ts propagation (spawned case)",
+      "symptom": "skills/pi-extension-builder self-test.mjs fails in the generated package's typecheck \u2014 missing ./endpoint-panel.ts (template drift) and, on another run, unresolved 'typebox'; fails identically with the 2-line canonical change present",
+      "scope": "workbench generator template set out of sync with itself \u2014 predates today's delegate work; the spawned-case change typechecks green in delegate (189/189), model-discovery (vendored re-sync), and root",
+      "action": "backlog item for the pi-extension-builder workbench; not blocking delegate 0.7.0"
+    }
   ]
 }
