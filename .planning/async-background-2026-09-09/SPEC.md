@@ -549,6 +549,9 @@ details, `delegate.background` entries).
 | M4 | R17–R18 ask/note channels + strict-mode set update | **0.6.0** |
 | M5 | R19 user intercept + dashboard Answer… + polish | (0.6.x) |
 | M6 | R20 user-facing background launch (`/delegate bg` + dashboard action, derived description) — post-goal amendment, user request | **0.6.2** |
+| M7 | R21 rendered-view presentation (markdown-native envelopes, export-clean) | **0.6.3** |
+| M8 | background-spawn result card fix (↗ spawned, never ✗/unknown/NaN) | **0.6.4** |
+| M9 | R22 execution-mode classification, background default (+ e2e scenario T) | **0.7.0** |
 
 Every milestone leaves `npm test` green (unit + e2e). Publish flow per AGENTS.md
 (tests → `npm version` → commit/push → `npm publish` → `pi install npm:@maheidem/pi-delegate`
