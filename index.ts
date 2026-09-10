@@ -54,6 +54,8 @@ import {
 	formatBackgroundInventoryText,
 	formatBackgroundStartedText,
 	makeReceiptReader,
+	PROGRESS_TYPE,
+	progressDisplay,
 	validateBackgroundDescription,
 	type BackgroundDetailView,
 	type BackgroundLiveView,
@@ -513,6 +515,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 				refreshDoctor(ctx);
 				const attempt = app.runBackground(request, {
 					onAsk: (ask) => background.onAsk(ask),
+					onProgress: (p) => background.onProgress(p),
 				});
 				if ("error" in attempt) {
 					return {
@@ -870,6 +873,18 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		return new Text(`[delegate ${d.runId ?? "?"} · ${d.role ?? "?"} · ${d.state ?? "?"}]\n\n${text}`, 0, 0);
 	});
 
+	// ── R23: progress renderer (neutral ● glyph, classification stripped) ───
+
+	pi.registerMessageRenderer(PROGRESS_TYPE, (message: { content?: string | unknown[]; details?: unknown }) => {
+		const d = (message.details ?? {}) as { runId?: string; description?: string };
+		const raw = message.content;
+		const text =
+			typeof raw === "string" ? raw
+			: Array.isArray(raw) ? raw.map((b) => (b as { text?: string })?.text ?? "").join("\n")
+			: "";
+		return new Text(progressDisplay(text, d), 0, 0);
+	});
+
 	// ── R15: background result renderer (neutral glyph+word, no model-only text)
 
 	pi.registerMessageRenderer(BACKGROUND_RESULT_TYPE, (message: { content?: string | unknown[]; details?: unknown }) => {
@@ -1035,6 +1050,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 		refreshDoctor(ctx);
 		const attempt = app.runBackground(request, {
 			onAsk: (ask) => background.onAsk(ask),
+			onProgress: (p) => background.onProgress(p),
 		});
 		if ("error" in attempt) {
 			say(ctx, formatRunText(attempt.error), "error");
@@ -1347,6 +1363,7 @@ export default function delegateExtension(pi: ExtensionAPI) {
 				{ key: "cfg:user:updateThrottleMs", label: "Update throttle", value: formatDuration(c.updateThrottleMs), rawValue: String(c.updateThrottleMs), kind: "input", inputHint: "live update cadence" },
 				{ key: "info:defaultRole", label: "Default role", value: c.defaultRole, kind: "info" },
 				{ key: "exec-default-toggle", label: "Execution default", value: c.defaultExecution, kind: "action" },
+				{ key: "progress-toggle", label: "Progress reports", value: c.progressReports.enabled ? "on" : "off", kind: "action" },
 				{ key: "info:retention", label: "Retention", value: `${c.maxRuns} runs · ${c.maxRunAgeDays}d`, kind: "info" },
 			];
 		};
@@ -1375,6 +1392,12 @@ export default function delegateExtension(pi: ExtensionAPI) {
 								const err = app.patchDefaultExecution(next);
 								return err ? { kind: "error", message: err } : { kind: "updated", message: `Execution default: ${next}` };
 							}
+							// R23: the progress-reports toggle flips enabled in place.
+							if (key === "progress-toggle") {
+								const next = !app.panelConfig().progressReports.enabled;
+								const err = app.patchProgressReportsEnabled(next);
+								return err ? { kind: "error", message: err } : { kind: "updated", message: `Progress reports: ${next ? "on" : "off"}` };
+						}
 							return { kind: "close", action: "advanced-done" };
 						},
 						requestRender: () => tui.requestRender(),

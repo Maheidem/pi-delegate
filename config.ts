@@ -31,6 +31,14 @@ export interface DelegateConfigV1 {
 	defaultExecution: "background" | "foreground";
 	/** R9: concurrent background children (default 3, clamp 1–8). */
 	maxBackgroundRuns: number;
+	/** R23: automatic progress reports for background runs. */
+	progressReports: {
+		enabled: boolean;
+		minToolMs: number;
+		intervalMs: number;
+		minGapMs: number;
+		maxPerRun: number;
+	};
 	/** R17/R18: ask_parent channel (background children). */
 	askParent: {
 		enabled: boolean;
@@ -56,6 +64,13 @@ export const DEFAULT_DELEGATE_CONFIG: DelegateConfigV1 = {
 	updateThrottleMs: 100,
 	defaultExecution: "background",
 	maxBackgroundRuns: 3,
+	progressReports: {
+		enabled: true,
+		minToolMs: 60_000,
+		intervalMs: 300_000,
+		minGapMs: 120_000,
+		maxPerRun: 6,
+	},
 	askParent: {
 		enabled: true,
 		timeoutMs: 600_000,
@@ -103,7 +118,13 @@ const MAX_VALUES: Partial<Record<keyof DelegateConfigV1, number>> = {
 export function normalizeConfig(
 	raw: unknown,
 ): { config: DelegateConfigV1; unknownKeys: string[] } {
-	const base: DelegateConfigV1 = { ...DEFAULT_DELEGATE_CONFIG };
+	const base: DelegateConfigV1 = {
+		...DEFAULT_DELEGATE_CONFIG,
+		// nested blocks are shared references in the default — copy so a
+		// normalize never mutates DEFAULT_DELEGATE_CONFIG
+		askParent: { ...DEFAULT_DELEGATE_CONFIG.askParent },
+		progressReports: { ...DEFAULT_DELEGATE_CONFIG.progressReports },
+	};
 	const unknownKeys: string[] = [];
 	const extras: Record<string, unknown> = {};
 	const known = new Set<string>(Object.keys(base));
@@ -149,6 +170,24 @@ function applyKnownField(config: DelegateConfigV1, key: string, value: unknown):
 		// R22: accept exactly the two enum words; anything else keeps the default.
 		if (value === "background" || value === "foreground") {
 			config.defaultExecution = value;
+		}
+		return;
+	}
+	if (key === "progressReports") {
+		if (!value || typeof value !== "object" || Array.isArray(value)) return;
+		const raw = value as Record<string, unknown>;
+		if (typeof raw.enabled === "boolean") config.progressReports.enabled = raw.enabled;
+		if (Number.isFinite(Number(raw.minToolMs))) {
+			config.progressReports.minToolMs = Math.min(3_600_000, Math.max(5_000, Number(raw.minToolMs)));
+		}
+		if (Number.isFinite(Number(raw.intervalMs))) {
+			config.progressReports.intervalMs = Math.min(3_600_000, Math.max(60_000, Number(raw.intervalMs)));
+		}
+		if (Number.isFinite(Number(raw.minGapMs))) {
+			config.progressReports.minGapMs = Math.min(1_800_000, Math.max(30_000, Number(raw.minGapMs)));
+		}
+		if (Number.isFinite(Number(raw.maxPerRun))) {
+			config.progressReports.maxPerRun = Math.min(20, Math.max(1, Math.trunc(Number(raw.maxPerRun))));
 		}
 		return;
 	}

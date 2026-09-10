@@ -44,6 +44,14 @@ export interface RunnerConfig {
 	/** R1: watchdog budget while a tool call is in flight (default: hard). */
 	stuckToolTimeoutMs?: number;
 	updateThrottleMs: number;
+	/** R23: progress-report policy (background runs; absent = no reports). */
+	progressReports?: {
+		enabled: boolean;
+		minToolMs: number;
+		intervalMs: number;
+		minGapMs: number;
+		maxPerRun: number;
+	};
 	maxRecordBytes?: number;
 	malformedThreshold?: number;
 }
@@ -52,6 +60,41 @@ export type PiInvocationResolver = (piPath?: string) => {
 	command: string;
 	args: string[];
 };
+
+/**
+ * R23: the pure per-run progress throttle decision. `reason` is the fire
+ * point ("tool" for a long tool end, "heartbeat" for the interval timer);
+ * the minToolMs gate is applied by the caller before invoking this.
+ * Returns true when a report should be emitted (the caller then updates
+ * its state: reportsSent + 1, lastReportAt = now).
+ */
+export interface ProgressThrottleState {
+	reportsSent: number;
+	lastReportAt: number;
+	startedMs: number;
+}
+
+export type ProgressReportConfig = {
+	enabled: boolean;
+	minToolMs: number;
+	intervalMs: number;
+	minGapMs: number;
+	maxPerRun: number;
+};
+
+export function shouldEmitProgress(
+	state: ProgressThrottleState,
+	now: number,
+	cfg: ProgressReportConfig,
+	reason: "tool" | "heartbeat",
+): boolean {
+	if (!cfg.enabled) return false;
+	if (state.reportsSent >= cfg.maxPerRun) return false;
+	const since = now - state.lastReportAt;
+	if (state.reportsSent > 0 && since < cfg.minGapMs) return false;
+	if (reason === "heartbeat" && now - state.startedMs < cfg.intervalMs) return false;
+	return true;
+}
 
 /**
  * Robust Pi executable resolution (official example pattern, §9.4):
@@ -308,6 +351,9 @@ export class DelegateRunner {
 	private readonly promptId: string;
 	/** R16: steering sequence (follow_up record ids). */
 	private steerSeq = 0;
+	/** R23: progress-report throttle state + heartbeat timer. */
+	private progressState: ProgressThrottleState = { reportsSent: 0, lastReportAt: 0, startedMs: 0 };
+	private progressTimer: NodeJS.Timeout | null = null;
 
 	constructor(opened: OpenedRun, req: RunnerSpawnRequest, cfg: RunnerConfig, hooks: RunHooks = {}, resolveInvocation?: PiInvocationResolver) {
 		this.opened = opened;
@@ -430,6 +476,14 @@ export class DelegateRunner {
 		this.armInactivity();
 		this.hardTimer = setTimeout(() => this.cancel("timed_out_hard"), this.cfg.hardTimeoutMs);
 		this.hardTimer.unref();
+
+		// R23: progress-report heartbeat (background runs only — the hook is
+		// wired solely by the background spawn path).
+		this.progressState = { reportsSent: 0, lastReportAt: Date.now(), startedMs: this.startedAtMs };
+		if (this.hooks.onProgress && this.cfg.progressReports?.enabled && this.cfg.progressReports.intervalMs > 0) {
+			this.progressTimer = setInterval(() => this.maybeEmitProgress("heartbeat"), this.cfg.progressReports.intervalMs);
+			this.progressTimer.unref();
+		}
 
 		// A fast-exiting child closes stdin before/as the prompt is written;
 		// the resulting EPIPE must never escape as an unhandled stream error
@@ -574,6 +628,14 @@ export class DelegateRunner {
 						if (cls.toolName) this.toolNames.set(cls.id, cls.toolName);
 						this.toolDetails.set(cls.id, feedDetailFor(cls.toolName ?? "", cls.args));
 					} else if (cls.phase === "end") {
+						// R23: a long tool completion is a progress fire point —
+						// read the duration BEFORE the bookkeeping deletes it.
+						const toolStart = this.toolStartedAt.get(cls.id);
+						const toolDuration = toolStart != null ? Date.now() - toolStart : undefined;
+						const toolName = this.toolNames.get(cls.id);
+						if (toolName && toolDuration != null && toolDuration >= (this.cfg.progressReports?.minToolMs ?? Number.POSITIVE_INFINITY)) {
+							this.maybeEmitProgress("tool", { name: toolName, durationMs: toolDuration });
+						}
 						this.openToolCalls.delete(cls.id);
 						this.toolStartedAt.delete(cls.id);
 						this.toolNames.delete(cls.id);
@@ -1234,6 +1296,27 @@ export class DelegateRunner {
 		}
 	}
 
+	/** R23: shared throttle gate for both fire points; updates state on emit. */
+	private maybeEmitProgress(reason: "tool" | "heartbeat", lastTool?: { name: string; durationMs: number }): void {
+		const cfg = this.cfg.progressReports;
+		const hook = this.hooks.onProgress;
+		if (!cfg || !hook) return;
+		const now = Date.now();
+		if (!shouldEmitProgress(this.progressState, now, cfg, reason)) return;
+		this.progressState = { ...this.progressState, reportsSent: this.progressState.reportsSent + 1, lastReportAt: now };
+		try {
+			hook({
+				runId: this.runId,
+				elapsedMs: this.startedAtMs ? now - this.startedAtMs : 0,
+				...(lastTool ? { lastTool } : {}),
+				inFlightTools: this.openToolNames(),
+				tokens: { input: this.usage.input, output: this.usage.output },
+			});
+		} catch {
+			// progress failures never affect the run
+		}
+	}
+
 	private pushUpdate(phase: "starting" | "running" | `tool:${string}` | "finalizing"): void {
 		if (!this.hooks.onUpdate) return;
 		const now = Date.now();
@@ -1311,6 +1394,8 @@ export class DelegateRunner {
 		// completion to guarantee the child is killed (short-lived refs).
 		if (this.inactivityTimer) clearTimeout(this.inactivityTimer);
 		if (this.hardTimer) clearTimeout(this.hardTimer);
+		if (this.progressTimer) clearInterval(this.progressTimer);
+		this.progressTimer = null;
 		if (this.killGraceTimer) clearTimeout(this.killGraceTimer);
 		if (this.settleExitTimer) clearTimeout(this.settleExitTimer);
 		if (this.handoffGraceTimer) clearTimeout(this.handoffGraceTimer);

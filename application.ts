@@ -200,6 +200,24 @@ export class DelegateApplicationImpl implements DelegateApplication {
 		}
 	}
 
+	/**
+	 * R23: toggle progress reports (dashboard Advanced screen). Persists
+	 * through the same saveConfig path as patchDefaultExecution.
+	 */
+	patchProgressReportsEnabled(value: boolean): string | null {
+		try {
+			const { config } = normalizeConfig({
+				...(this.liveConfig as unknown as Record<string, unknown>),
+				progressReports: { ...this.liveConfig.progressReports, enabled: value },
+			});
+			saveConfig(this.ports.agentDir, config);
+			this.liveConfig = config;
+			return null;
+		} catch (error) {
+			return `Save failed: ${(error as Error).message}`;
+		}
+	}
+
 	// ── Mode ───────────────────────────────────────────────────────────────
 
 	isStrict(): boolean {
@@ -244,7 +262,7 @@ export class DelegateApplicationImpl implements DelegateApplication {
 	}
 
 	/** Advanced knobs for the dashboard's Configure-advanced screen (§ S7). */
-	panelConfig(): Pick<DelegateConfigV1, "queueLimit" | "killGraceMs" | "handoffGraceMs" | "handoffEnforceTimeoutMs" | "stuckToolTimeoutMs" | "maxTaskBytes" | "maxResultBytes" | "updateThrottleMs" | "defaultRole" | "defaultExecution" | "maxRuns" | "maxRunAgeDays"> {
+	panelConfig(): Pick<DelegateConfigV1, "queueLimit" | "killGraceMs" | "handoffGraceMs" | "handoffEnforceTimeoutMs" | "stuckToolTimeoutMs" | "maxTaskBytes" | "maxResultBytes" | "updateThrottleMs" | "defaultRole" | "defaultExecution" | "maxRuns" | "maxRunAgeDays" | "progressReports"> {
 		const c = this.liveConfig;
 		return {
 			queueLimit: c.queueLimit,
@@ -259,6 +277,7 @@ export class DelegateApplicationImpl implements DelegateApplication {
 			defaultExecution: c.defaultExecution,
 			maxRuns: c.maxRuns,
 			maxRunAgeDays: c.maxRunAgeDays,
+			progressReports: c.progressReports,
 		};
 	}
 
@@ -383,7 +402,7 @@ export class DelegateApplicationImpl implements DelegateApplication {
 	/** R8: spawn a background run — same validation and spawn path as the
 	 * foreground, but no slot reservation, no queue, and the caller gets a
 	 * live handle instead of the terminal result. */
-	runBackground(request: DelegateRequest, hooks: { onAsk?: RunHooks["onAsk"] } = {}): { error: DelegateRunResult } | { handle: BackgroundRunHandle } {
+	runBackground(request: DelegateRequest, hooks: { onAsk?: RunHooks["onAsk"]; onProgress?: RunHooks["onProgress"] } = {}): { error: DelegateRunResult } | { handle: BackgroundRunHandle } {
 		const prepared = this.prepareRun(request);
 		if ("error" in prepared) return { error: prepared.error };
 		const { opened, role, task, model, cfg, timeoutInfo, modelNote, resumeOf, sessionPath, sessionDir } = prepared;
@@ -413,7 +432,7 @@ export class DelegateApplicationImpl implements DelegateApplication {
 				...(sessionDir ? { sessionDir } : {}),
 				...(askDir && askTimeoutMs ? { background: true, askDir, askTimeoutMs, ...(askMaxQuestions ? { askMaxQuestions } : {}) } : {}),
 			},
-			cfg,
+			{ ...cfg, progressReports: this.liveConfig.progressReports },
 			{
 				onUpdate: (u: RunStreamUpdate) => {
 				streamEntry.latest = u;
@@ -422,6 +441,7 @@ export class DelegateApplicationImpl implements DelegateApplication {
 					ring.push(e);
 			},
 				...(hooks.onAsk ? { onAsk: hooks.onAsk } : {}),
+				...(hooks.onProgress ? { onProgress: hooks.onProgress } : {}),
 			},
 			this.ports.resolveInvocation ?? resolvePiInvocation,
 		);

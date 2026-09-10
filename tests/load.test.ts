@@ -69,6 +69,7 @@ test("load: registers exactly /delegate + delegate tool (no aliases)", async () 
 		"delegate-child-question",
 		"delegate-child-note",
 		"delegate-handoff",
+		"delegate-background-progress",
 		"delegate-background-result",
 	]);
 	for (const ev of ["tool_call", "session_start", "session_tree", "before_agent_start", "turn_start", "session_shutdown"]) {

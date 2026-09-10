@@ -1175,6 +1175,55 @@ async function main() {
 		}
 	}
 
+	// ── Scenario U: R23 — automatic progress reports fire before the terminal ──
+	{
+		if (runScenario("U")) {
+		const dir = makeWorkspace();
+		// Project overlay: aggressive progress knobs so a report fires early.
+		fs.mkdirSync(path.join(dir, ".pi", "delegate"), { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, ".pi", "delegate", "config.json"),
+			JSON.stringify({ progressReports: { minToolMs: 30_000, intervalMs: 60_000, minGapMs: 10_000 } }),
+		);
+		const sessionFile = path.join(dir, "e2e-session.jsonl");
+		const pi = startPi(dir, { session: sessionFile });
+		await pi.prompt("/delegate bg First run bash sleep 75, then create u-marker.txt containing the word PROGRESSED, verify it, and finish.", 60_000);
+		const created = await waitFor(
+				() => bgLedger(readSessionEntries(sessionFile)).find((e) => e.data?.type === "created"),
+			120_000,
+			"created entry",
+		);
+		ok(!!created, "U: background run created");
+		const uRunId = created?.data?.runId;
+		if (uRunId) {
+			const progress = await waitFor(
+					() => readSessionEntries(sessionFile).find(
+						(e) => e.type === "custom_message" && e.customType === "delegate-background-progress" && e.details?.runId === uRunId,
+					) ?? null,
+				420_000,
+				"progress message",
+			);
+			ok(!!progress, "U: at least one delegate-background-progress message arrived");
+			ok(String(progress?.content ?? "").includes(": progress]"), "U: envelope header carries ': progress]'");
+			ok(String(progress?.content ?? "").includes("internal work event"), "U: classification comment present");
+			const done = await waitFor(
+					() => readSessionEntries(sessionFile).find(
+						(e) => e.type === "custom_message" && e.customType === "delegate-background-result" && e.details?.runId === uRunId,
+					) ?? null,
+				420_000,
+				"terminal",
+			);
+			ok(done?.details?.state === "succeeded", `U: run still succeeded (got ${done?.details?.state})`);
+			const entries = readSessionEntries(sessionFile);
+			const pIdx = entries.findIndex((e) => e.type === "custom_message" && e.customType === "delegate-background-progress" && e.details?.runId === uRunId);
+			const rIdx = entries.findIndex((e) => e.type === "custom_message" && e.customType === "delegate-background-result" && e.details?.runId === uRunId);
+			ok(pIdx >= 0 && rIdx >= 0 && pIdx < rIdx, "U: progress arrived BEFORE the terminal report");
+			ok(fs.readFileSync(path.join(dir, "u-marker.txt"), "utf8").includes("PROGRESSED"), "U: child wrote u-marker.txt");
+		}
+		await stop(pi);
+		}
+	}
+
 	console.log(`\nE2E checks: ${checks - fails.length}/${checks}`);
 	if (fails.length) {
 		for (const f of fails) console.error(`FAILED: ${f}`);

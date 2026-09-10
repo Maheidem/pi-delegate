@@ -446,6 +446,8 @@ export type RunHooks = {
 	onEvent?: (event: FeedEvent) => void;
 	/** R17/R18: ask_parent channel events from the child stream. */
 	onAsk?: (ask: { runId: string; phase: "start" | "end"; kind: "question" | "note"; topic: string; text: string; toolCallId: string }) => void;
+	/** R23: automatic progress report (background runs only). */
+	onProgress?: (p: { runId: string; elapsedMs: number; lastTool?: { name: string; durationMs: number }; inFlightTools: string[]; tokens: { input: number; output: number } }) => void;
 	abortSignal?: AbortSignal;
 };
 

@@ -27,6 +27,7 @@ import type {
 } from "./types.ts";
 import { isTerminalRunState } from "./types.ts";
 import { isPidAlive, readRunMetadata } from "./run-store.ts";
+import { formatDuration } from "./config.ts";
 import { CHILD_NOTE_TYPE, CHILD_QUESTION_TYPE } from "./ask.ts";
 export { CHILD_NOTE_TYPE, CHILD_QUESTION_TYPE };
 
@@ -34,6 +35,8 @@ export { CHILD_NOTE_TYPE, CHILD_QUESTION_TYPE };
 export const BACKGROUND_LEDGER_TYPE = "delegate.background";
 /** R10: terminal-result custom-message type. */
 export const BACKGROUND_RESULT_TYPE = "delegate-background-result";
+/** R23: intermediate progress-report custom-message type. */
+export const PROGRESS_TYPE = "delegate-background-progress";
 
 /**
  * R20: derive a valid 3–6-word description from the task's first line when
@@ -155,6 +158,43 @@ export function formatBackgroundResultEnvelope(
 		"<!-- This is the terminal report of a background delegation. The run has finished and cannot receive steering. Treat it as an internal work event: write user-visible text only if material, and do not re-narrate the handoff. -->\n" +
 		"\n" +
 		runText
+	);
+}
+
+/** R23: progress payload shared by the runner hook and the manager. */
+export interface ProgressReport {
+	runId: string;
+	elapsedMs: number;
+	lastTool?: { name: string; durationMs: number };
+	inFlightTools: string[];
+	tokens: { input: number; output: number };
+}
+
+function formatTokenCount(n: number): string {
+	if (!Number.isFinite(n) || n <= 0) return "0";
+	if (n < 1_000) return String(Math.round(n));
+	if (n < 1_000_000) return `${Math.round(n / 100) / 10}k`;
+	return `${Math.round(n / 100_000) / 10}M`;
+}
+
+/**
+ * R23: the intermediate progress envelope (R21 discipline: H3 header,
+ * single-line HTML-comment classification, body ≤ 2 lines). Never wakes
+ * the parent (triggerTurn: false downstream).
+ */
+export function formatProgressEnvelope(runId: string, role: RoleName, description: string, p: ProgressReport): string {
+	const line1 =
+		`${formatDuration(p.elapsedMs)} elapsed` +
+		(p.lastTool ? ` · ${p.lastTool.name} done (${formatDuration(p.lastTool.durationMs)})` : "");
+	const line2 =
+		`↑${formatTokenCount(p.tokens.input)} ↓${formatTokenCount(p.tokens.output)}` +
+		(p.inFlightTools.length ? ` · in flight: ${p.inFlightTools.join(", ")}` : "");
+	return (
+		`### [delegate background ${runId} · ${role} · ${description}: progress]\n` +
+		"\n" +
+		"<!-- This is an intermediate progress report. The run is still working and needs no reply. Treat it as an internal work event. -->\n" +
+		"\n" +
+		`${line1}\n${line2}`
 	);
 }
 
@@ -578,6 +618,22 @@ export class BackgroundManager {
 		});
 	}
 
+	/** R23: runner hook — deliver a bounded progress report (never wakes the
+	 * parent; fire-and-forget; NO ledger entries). */
+	onProgress(p: ProgressReport): void {
+		const run = this.#runs.get(p.runId);
+		if (!run) return;
+		if (run.generation !== this.#generation) return; // stale session: no delivery
+		if (run.done) return;
+		this.enqueueAskMessage({
+			customType: PROGRESS_TYPE,
+			content: formatProgressEnvelope(p.runId, run.handle.role, run.handle.description, p),
+			display: true,
+			details: { runId: p.runId, role: run.handle.role, description: run.handle.description, kind: "progress", elapsedMs: p.elapsedMs },
+			triggerTurn: false,
+		});
+	}
+
 	/** Notes and questions share the serialized tail; notes never wake. */
 	private enqueueAskMessage(message: {
 		customType: string;
@@ -759,6 +815,17 @@ export function backgroundResultDisplay(content: string, details: { runId?: stri
 	const head = bodyLines[0] ?? "";
 	const shown = [head.split("\n")[0], ...bodyLines.slice(1)].join("\n").split("\n").slice(0, 14).join("\n");
 	return `${glyph} background ${runId}${desc}: ${word}\n\n${shown}`;
+}
+
+/** R23: display text for an intermediate progress message: neutral ●
+ * glyph header + body, with the model-only classification comment
+ * stripped (same split discipline as backgroundResultDisplay). */
+export function progressDisplay(content: string, details: { runId?: string; description?: string }): string {
+	const parts = content.split("\n\n");
+	const body = parts.length > 2 ? parts.slice(2).join("\n\n") : content;
+	const runId = (details.runId ?? "?").slice(-12);
+	const desc = details.description ? ` · ${details.description}` : "";
+	return `● background ${runId}${desc}: progress\n\n${body}`;
 }
 
 /** Default receipt reader bound to an agentDir (used by the adapter). */

@@ -362,6 +362,26 @@ model guidance flips: background by default, foreground only when the next step
 depends on the result. Pre-existing e2e scenarios that test foreground behavior
 pass `--foreground` explicitly, which makes their intent truthful.
 
+**R23 — Automatic progress reports (OQ-1, user-approved 2026-09-10: hybrid
+trigger, on by default, capped).** Background runs emit bounded, model-visible
+progress messages delivered EXACTLY like notes (R18): `triggerTurn: false`,
+never wake an idle parent, join the next turn's context, serialized on the
+delivery tail, NO ledger entries (fire-and-forget; at-most-once is acceptable).
+Trigger policy (hybrid): a report fires when a child tool call completes with
+duration ≥ `progressReports.minToolMs` (default 60 s) OR on the elapsed-time
+heartbeat `progressReports.intervalMs` (default 5 min), whichever comes first,
+subject to `progressReports.minGapMs` between consecutive reports (default
+2 min) and a hard per-run cap `progressReports.maxPerRun` (default 6); past the
+cap, no further progress until the terminal report. Enabled by default
+(`progressReports.enabled: true`; config + project overlay; dashboard Advanced
+row). Envelope follows R21 discipline: `### [delegate background <runId> ·
+<role> · <description>: progress]`, single-line HTML-comment classification
+("This is an intermediate progress report. The run is still working… no user
+reply needed"), body ≤ 2 lines: elapsed, phase/last completed tool + duration,
+tokens ↑↓, in-flight tool if any. TUI renders `● background …: progress`
+(never red); details carry `kind: "progress"`. Foreground runs are exempt.
+Context cost is bounded by the caps; the runner owns throttle state per run.
+
 **R21 — Rendered-view presentation (export + TUI).** Custom-message content is
 read by TWO audiences: the model (raw content, verbatim) and rendered views
 (pi's HTML export renders `display: true` custom messages as markdown in a
@@ -562,7 +582,7 @@ Every milestone leaves `npm test` green (unit + e2e). Publish flow per AGENTS.md
 - **OQ-1** — Automatic model-visible progress (phase-change milestones,
   `triggerTurn: false`): deferred; notes (R18) cover the child-initiated need.
   Revisit if users ask for live intermediate evidence in parent context.
-- **OQ-2** — Phase 3 detached runner ("pi-fleet-lite", loop-extension runner
+- **OQ-2** (DEPRIORITIZED by user 2026-09-10 — do not build without an explicit user request) — Phase 3 detached runner ("pi-fleet-lite", loop-extension runner
   pattern) for parent-exit durability: deferred. Entry criteria: a real workflow
   needs children to outlive the parent session AND `resumeFrom`-based recovery
   proves too lossy in practice. If triggered, the file-based answer channel and

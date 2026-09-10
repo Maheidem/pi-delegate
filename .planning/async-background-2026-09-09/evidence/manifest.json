@@ -3,7 +3,7 @@
   "feature": "async/background delegation (SPEC R8\u2013R19)",
   "goalBaseline": "0.3.2 @ c5f14a6, SPEC APPROVED 2026-09-09",
   "finalState": {
-    "version": "0.7.0",
+    "version": "0.7.1",
     "gates": {
       "typecheck": "0 errors",
       "unit": "178/178 (143 pre-existing semantics preserved; inventory assertions updated for spec-mandated additions: delegate_status/delegate_send/delegate_answer tools, 4 message renderers, strict 4-tool set)",
@@ -115,6 +115,16 @@
       "userDecisions": "panel foreground = flag+toggle only; description always required",
       "dogfood": "implementation by background delegation del_\u2026918ae832 (session's fifth background run)",
       "shipped": "0.7.0"
+    },
+    "M10": {
+      "status": "gate-passed (R23, user-approved design: hybrid trigger, on by default, capped)",
+      "gate": "typecheck 0; unit 197/197; e2e U 7/7 on zai/glm-5.3 (progress message arrives BEFORE the terminal report on a sleep-75 run)",
+      "requirements": [
+        "R23 automatic progress reports: long-tool (>=60s) + 5m heartbeat triggers, minGap 2m, max 6/run, triggerTurn:false, no ledger writes, progressReports config + Advanced toggle"
+      ],
+      "bonusFix": "normalizeConfig now deep-copies nested config blocks (pre-existing shared-reference mutation of DEFAULT_DELEGATE_CONFIG)",
+      "dogfood": "implementation by background delegation del_\u2026a0007af0",
+      "shipped": "0.7.1"
     }
   },
   "knownGaps": [
