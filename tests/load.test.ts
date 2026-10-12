@@ -36,17 +36,22 @@ async function loadFactory() {
 function mockPi() {
 	const commands: string[] = [];
 	const tools: string[] = [];
+	const toolDefs: Array<{ name: string; promptSnippet?: unknown }> = [];
 	const events: string[] = [];
 	const messageRenderers: string[] = [];
 	return {
 		commands,
 		tools,
+		toolDefs,
 		events,
 		get messageRenderers() {
 			return messageRenderers;
 		},
 		registerCommand: (name: string) => commands.push(name),
-		registerTool: (def: { name: string }) => tools.push(def.name),
+		registerTool: (def: { name: string; promptSnippet?: unknown }) => {
+			tools.push(def.name);
+			toolDefs.push(def);
+		},
 		on: (event: string) => events.push(event),
 		registerMessageRenderer: (type: string) => {
 			messageRenderers.push(type);
@@ -89,5 +94,29 @@ test("load: inert when PI_DELEGATE_CHILD=1", async () => {
 		assert.deepEqual(pi.tools, ["handoff"]);
 	} finally {
 		delete process.env.PI_DELEGATE_CHILD;
+	}
+});
+
+// Pi >= 1.0 lists an extension tool in the system prompt only when it has a
+// promptSnippet. A tool without one is invisible to small models.
+test("load: every registered tool (parent + child + ask_parent) has a non-empty promptSnippet", async () => {
+	process.env.PI_DELEGATE_AGENT_DIR = isolatedAgentDir();
+	const factory = await loadFactory();
+	const parent = mockPi();
+	(factory as (pi: unknown) => void)(parent);
+	process.env.PI_DELEGATE_CHILD = "1";
+	process.env.PI_DELEGATE_ASK_DIR = isolatedAgentDir();
+	const child = mockPi();
+	try {
+		(factory as (pi: unknown) => void)(child);
+	} finally {
+		delete process.env.PI_DELEGATE_CHILD;
+		delete process.env.PI_DELEGATE_ASK_DIR;
+	}
+	assert.deepEqual(child.tools, ["handoff", "ask_parent"]);
+	const defs = [...parent.toolDefs, ...child.toolDefs];
+	assert.equal(defs.length, 6);
+	for (const def of defs) {
+		assert.ok(typeof def.promptSnippet === "string" && def.promptSnippet.trim().length > 0, `tool ${def.name} has no promptSnippet`);
 	}
 });

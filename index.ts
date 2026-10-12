@@ -150,6 +150,13 @@ function registerChildHandoffTool(pi: ExtensionAPI): void {
 			"MANDATORY final report for this delegated run. Your run does not complete until this tool " +
 			"has been called with a valid submission; free-text endings are rejected and you will be re-prompted. " +
 			"When terminated mid-work, call it immediately with outcome=partial.",
+		// Pi >= 1.0 lists an extension tool in the system prompt's <tools> section
+		// only when it has a promptSnippet. Without one, small models read that
+		// list, say "I don't have a handoff tool" and end with free text instead.
+		promptSnippet: "Submit the mandatory structured final report for this delegated run",
+		promptGuidelines: [
+			"handoff is a real tool in this session. End the run by calling handoff; do not end with free text or say the tool is unavailable.",
+		],
 		parameters: HandoffToolParams,
 		async execute(_toolCallId, params): Promise<{
 			content: Array<{ type: "text"; text: string }>;

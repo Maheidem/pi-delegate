@@ -116,6 +116,14 @@ export function registerAskParentTool(pi: ExtensionAPI, env: AskEnv): void {
 			"Ask the delegating parent agent a question (you block until it answers or the budget expires) or file a non-blocking note. " +
 			"Ask only when you are genuinely blocked or a wrong guess is expensive; for cheap decisions proceed with a stated assumption instead. " +
 			"Prefer notes for risks and observations — they never stall your run.",
+		// Pi >= 1.0 lists an extension tool in the system prompt's <tools> section
+		// only when it has a promptSnippet. Without one, small models read that
+		// list, say "I don't have an ask_parent tool" and never call it, even
+		// though the tool is declared to the provider.
+		promptSnippet: "Ask the delegating parent agent a question (blocks until it answers) or file a non-blocking note",
+		promptGuidelines: [
+			"ask_parent is a real tool in this session. When the user or task tells you to ask the parent, call ask_parent; do not say it is unavailable.",
+		],
 		parameters: AskParentParams,
 		async execute(toolCallId: string, params): Promise<AskToolResult> {
 			const validation = validateAskSubmission(params);
